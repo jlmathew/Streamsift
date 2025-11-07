@@ -10,6 +10,13 @@
  * compile to zero instructions, incurring no runtime overhead.
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #ifndef __BENCHMARK_H__
 #define __BENCHMARK_H__
 

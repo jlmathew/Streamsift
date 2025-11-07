@@ -3,6 +3,13 @@
  * @brief Defines a parser for protocol timeout configuration.
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #ifndef __CONFIG_PARSER_H__
 #define __CONFIG_PARSER_H__
 

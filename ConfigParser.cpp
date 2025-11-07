@@ -3,6 +3,13 @@
  * @brief Implementation of the ConfigParser.
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #include "ConfigParser.h"
 #include "Logger.h"
 #include <fstream>

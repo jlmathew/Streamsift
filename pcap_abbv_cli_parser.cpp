@@ -3,6 +3,13 @@
  * @brief Implementation of the command-line parser.
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #include "pcap_abbv_cli_parser.h"
 #include <vector>
 #include <string>

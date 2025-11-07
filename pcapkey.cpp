@@ -3,6 +3,13 @@
  * @brief Implementation of the packet parser and key generator.
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #include "pcapkey.h"
 #include <iomanip> // for string formatting
 #include <sstream> // for string formatting

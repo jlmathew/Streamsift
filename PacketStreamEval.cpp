@@ -3,6 +3,13 @@
  * @brief Implementation of the PacketStreamEval class.
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #include "PacketStreamEval.h"
 #include "pcap_abbv_cli_parser.h" // For globalOptions
 #include "Logger.h"

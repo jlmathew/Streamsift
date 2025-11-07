@@ -3,6 +3,13 @@
  * @brief Implementation of the consumer thread's main logic.
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #include "consumer.h"
 #include "Globals.h"
 #include "Logger.h"

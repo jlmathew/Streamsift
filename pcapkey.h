@@ -4,6 +4,13 @@
  * and 5-tuple key generation.
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #ifndef __PCAPKEY_H__
 #define __PCAPKEY_H__
 

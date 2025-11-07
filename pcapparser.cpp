@@ -3,6 +3,13 @@
  * @brief Implementation of the AST parser and nodes.
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #include "pcapparser.h"
 #include <stdexcept>
 #include <cctype>

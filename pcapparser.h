@@ -2,6 +2,14 @@
  * @file pcapparser.h
  * @brief Defines the AST nodes and parser.
  */
+
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta
+ */
+
+
 #ifndef __pcap_abbv_parser_h__
 #define __pcap_abbv_parser_h__
 

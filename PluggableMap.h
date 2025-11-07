@@ -7,6 +7,13 @@
  * preprocessor macro (e.g., USE_STD_MAP).
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #ifndef __PLUGGABLE_MAP_H__
 #define __PLUGGABLE_MAP_H__
 

@@ -4,6 +4,13 @@
  * @version 0.9
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #ifndef __PACKET_STREAM_EVAL_H__
 #define __PACKET_STREAM_EVAL_H__
 

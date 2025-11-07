@@ -4,6 +4,13 @@
  * and function providers.
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #ifndef __PROTOTRIGGER_H__
 #define __PROTOTRIGGER_H__
 

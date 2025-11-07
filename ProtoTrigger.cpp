@@ -3,6 +3,13 @@
  * @brief Implementation of the protocol-specific trigger functions.
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #include "ProtoTrigger.h"
 #include "pcapparser.h" // For Func
 #include "Logger.h"

@@ -3,6 +3,13 @@
  * @brief Defines the thread-local variables for the benchmark system.
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #include "Benchmark.h"
 
 namespace pcapabvparser { // <-- WRAPPER ADDED

@@ -9,6 +9,13 @@
  * It also defines the data (pktBufferData_t) that is passed in the queues.
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #ifndef _nonblockingbuffers_h__
 #define _nonblockingbuffers_h__
 

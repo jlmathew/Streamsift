@@ -3,6 +3,13 @@
  * @brief Defines a simple, thread-safe console logger.
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #ifndef __LOGGER_H__
 #define __LOGGER_H__
 

@@ -4,6 +4,13 @@
  * @version 0.8
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #ifndef PCAP_ABBV_CLI_PARSER_H
 #define PCAP_ABBV_CLI_PARSER_H
 

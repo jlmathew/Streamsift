@@ -3,6 +3,13 @@
  * @brief Defines the main entry function for a consumer thread.
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #ifndef __CONSUMER_H__
 #define __CONSUMER_H__
 

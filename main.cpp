@@ -3,6 +3,13 @@
  * @brief Main entry point for the pcap parser application.
  */
 
+/*
+ * Author: James Mathewson
+ * Date: 6 November 2025
+ * Version: 0.7 beta 
+ */
+
+
 #include <iostream>
 #include <chrono>
 #include <pcap/pcap.h>
