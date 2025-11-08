@@ -318,7 +318,12 @@ int main(int argc, char* argv[]) {
               << "  Total Streams Saved:   " << g_total_streams_saved.load() << "\n"
               << "====================================\n" << std::endl;
 
-    return 0;
+    // FORCE EXIT: Skip static destructors to prevent segfaults on shutdown.
+    // We have already cleaned up all our important resources.
+    fflush(stdout);
+    fflush(stderr);
+    _exit(0);
+
 }
 
 

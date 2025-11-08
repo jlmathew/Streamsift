@@ -170,14 +170,14 @@ def gen_test14(fname):
 # 3. TEST HARNESS
 # ==========================================
 TESTS = [
-        {"id": 1, "name": "Basic RST Save", "gen": gen_test1, "args": ["-t", '"TCP.IsSyn()"', "-p", '"TCP.IsRst()"', "-d", "true"], "expected_files": 10, "desc": "Should save 10 streams and create 10 .detected files."},
-    {"id": 3, "name": "Arithmetic Filter", "gen": gen_test3, "args": ["-t", '"TCP.WindowSize() < 1000"'], "expected_files": 5},
-    {"id": 4, "name": "GRE/IPIP Encap", "gen": gen_test4, "args": ["-p", '"TCP.IsRst()"'], "expected_files": 20},
-    {"id": 6, "name": "Complex Boolean", "gen": gen_test6, "args": ["-t", '"(TCP.IsSyn() AND TCP.IsFin()) OR (TCP.IsRst() AND TCP.IsFin())"'], "expected_files": 10},
+        {"id": 1, "name": "Basic RST Save", "gen": gen_test1, "args": ["-t", "TCP.IsSyn()", "-p", "TCP.IsRst()", "-d", "true"], "expected_files": 10, "desc": "Should save 10 streams and create 10 .detected files."},
+    {"id": 3, "name": "Arithmetic Filter", "gen": gen_test3, "args": ["-t", "TCP.WindowSize() < 1000"], "expected_files": 5},
+    {"id": 4, "name": "GRE/IPIP Encap", "gen": gen_test4, "args": ["-t", '"TCP.IsRst()"'], "expected_files": 20},
+    {"id": 6, "name": "Complex Boolean", "gen": gen_test6, "args": ["-t", "(TCP.IsSyn() AND TCP.IsFin()) OR (TCP.IsRst() AND TCP.IsFin())"], "expected_files": 10},
     {"id": 10, "name": "Layer Specificity", "gen": gen_test10, "args": ["-t", '"IP.TTL(2) < 5"'], "expected_files": 10},
-    {"id": 11, "name": "Timeout Deletion", "gen": gen_test11, "args": ["-t", '"TCP.IsSyn()"', "-p", '"TCP.IsRst()"', "-c", "timeouts.conf"], "expected_files": 0},
-    {"id": 13, "name": "Ultra-Deep Encap", "gen": gen_test13, "args": ["-t", '"IP.TTL(2) == 20"'], "expected_files": 5},
-    {"id": 14, "name": "Directional Buffers", "gen": gen_test14, "args": ["-t", '"TCP.WindowSize() == 9999"', "-M", "separate", "-b", "10"], "expected_files": 2}
+    {"id": 11, "name": "Timeout Deletion", "gen": gen_test11, "args": ["-t", "TCP.IsSyn()", "-p", "TCP.IsRst()", "-c", "timeouts.conf"], "expected_files": 0},
+    {"id": 13, "name": "Ultra-Deep Encap", "gen": gen_test13, "args": ["-t", "IP.TTL(2) == 20"], "expected_files": 5},
+    {"id": 14, "name": "Directional Buffers", "gen": gen_test14, "args": ["-t", "TCP.WindowSize() == 9999", "-M", "separate", "-b", "10"], "expected_files": 2}
 ]
 
 def run_tests():
@@ -192,17 +192,33 @@ def run_tests():
         prefix = os.path.join(OUTPUT_DIR, f"out{test['id']}")
        
         # Force regenerate every time to be safe
-        if os.path.exists(pcap): os.remove(pcap)
-       
-        logger.info("Generating PCAP...")
-        pkts = test['gen'](pcap)
-        if test['id'] != 14: pkts.sort(key=lambda x: x.time)
-        wrpcap(pcap, pkts)
+        #if os.path.exists(pcap): os.remove(pcap)
+        # ... inside run_tests() loop ...
+        if not os.path.exists(pcap):
+            logger.info("Generating PCAP...")
+            pkts = test['gen'](pcap)
+            if test['id'] != 14: pkts.sort(key=lambda x: x.time)
+            wrpcap(pcap, pkts)
            
-        for f in pyglob.glob(f"{prefix}_*.pcap"): os.remove(f)
-        for f in pyglob.glob(f"{prefix}_*.detected"): os.remove(f)
+        # --- DEBUG: Comment these out to see if files persist ---
+        # for f in pyglob.glob(f"{prefix}_*.pcap"): os.remove(f)
+        # for f in pyglob.glob(f"{prefix}_*.detected"): os.remove(f)
 
-        cmd = [BINARY_PATH, "-r", pcap, "-j 0 -n", prefix] + test['args']
+        # Use -j 0 (single-thread) for now
+        cmd = [BINARY_PATH, "-r", pcap, "-n", prefix, "-j", "0"] + test['args']
+       
+        # ... run subprocess ...
+
+
+        #logger.info("Generating PCAP...")
+        #pkts = test['gen'](pcap)
+        #if test['id'] != 14: pkts.sort(key=lambda x: x.time)
+        #wrpcap(pcap, pkts)
+           
+        #for f in pyglob.glob(f"{prefix}_*.pcap"): os.remove(f)
+        #for f in pyglob.glob(f"{prefix}_*.detected"): os.remove(f)
+
+        #cmd = [BINARY_PATH, "-r", pcap, "-j 0 -n", prefix] + test['args']
         logger.info(f"CMD: {' '.join(cmd)}")
         try:
             # Increased timeout for larger tests
