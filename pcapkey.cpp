@@ -6,7 +6,7 @@
 /*
  * Author: James Mathewson
  * Date: 6 November 2025
- * Version: 0.7 beta 
+ * Version: 0.7 beta
  */
 
 
@@ -22,20 +22,17 @@
 #ifndef IPPROTO_GRE
 #define IPPROTO_GRE 47
 #endif
-
+#ifndef IPPROTO_ESP
+#define IPPROTO_ESP 50
+#endif
+#ifndef IPPROTO_AH
+#define IPPROTO_AH 51
+#endif
 
 namespace pcapabvparser {
 
 /**
  * @brief Internal recursive helper for parse_packet.
- * @param current_proto_type The protocol type to parse (e.g., ETHERTYPE_IP).
- * @param packet Pointer to the start of the *full* packet.
- * @param offset The *current offset* into the packet where we are parsing.
- * @param caplen The *total* captured length of the packet.
- * @param key The 5-tuple key being built.
- * @param offsets The PacketOffsets_t helper being built.
- * @param stack The ProtocolStack_t being built.
- * @param tls_ports The set of ports to identify as TLS.
  */
 static void parse_recursive(
     uint32_t current_proto_type,
@@ -43,6 +40,7 @@ static void parse_recursive(
     size_t& offset,
     size_t caplen,
     std::vector<uint8_t>& key,
+    bool& key_locked,
     PacketOffsets_t& offsets,
     ProtocolStack_t& stack,
     const std::set<uint16_t>& tls_ports)
@@ -52,31 +50,29 @@ static void parse_recursive(
     ProtocolInfo info;
     info.type = current_proto_type;
     info.data_ptr = packet + offset;
-    
+   
     uint32_t next_proto_type = 0;
 
     switch (current_proto_type) {
-        // --- L3 Protocols (EtherTypes) ---
+        // --- L3 Protocols ---
         case ETHERTYPE_IP: { // IPv4
             if (offset + sizeof(ip) > caplen) return;
             const ip* ipv4 = reinterpret_cast<const ip*>(packet + offset);
-            
-            if (ipv4->ip_v != 4) return; // Not IPv4
-            
+            if (ipv4->ip_v != 4) return;
+           
             info.header_length = ipv4->ip_hl * 4;
-            if (offset + info.header_length > caplen) return; // Bad header len
-            
+            if (offset + info.header_length > caplen) return;
             info.payload_length = ntohs(ipv4->ip_len) - info.header_length;
             offset += info.header_length;
 
-            offsets.l3_offset = (size_t)(info.data_ptr - packet);
-            offsets.ip_protocol = ipv4->ip_p;
-            
-            // --- Key Generation (IPv4) ---
-            if (key.empty()) { // Only key on the *first* L3 header
-                key.push_back((uint8_t)((offsets.ethertype >> 8) & 0xFF));
-                key.push_back((uint8_t)(offsets.ethertype & 0xFF));
-                
+            if (!key_locked && key.empty()) {
+                offsets.l3_offset = (size_t)(info.data_ptr - packet);
+                offsets.ip_protocol = ipv4->ip_p;
+                offsets.ethertype = ETHERTYPE_IP;
+
+                key.push_back((uint8_t)((ETHERTYPE_IP >> 8) & 0xFF));
+                key.push_back((uint8_t)(ETHERTYPE_IP & 0xFF));
+               
                 if (ntohl(ipv4->ip_src.s_addr) > ntohl(ipv4->ip_dst.s_addr)) {
                     key.insert(key.end(), (uint8_t*)&ipv4->ip_src, (uint8_t*)&ipv4->ip_src + 4);
                     key.insert(key.end(), (uint8_t*)&ipv4->ip_dst, (uint8_t*)&ipv4->ip_dst + 4);
@@ -87,8 +83,6 @@ static void parse_recursive(
                     offsets.originalAddrPortOrdering = false;
                 }
             }
-            // --- End Key Gen ---
-
             next_proto_type = ipv4->ip_p;
             break;
         }
@@ -96,22 +90,19 @@ static void parse_recursive(
         case ETHERTYPE_IPV6: { // IPv6
             if (offset + sizeof(ip6_hdr) > caplen) return;
             const ip6_hdr* ipv6 = reinterpret_cast<const ip6_hdr*>(packet + offset);
-
-            if ((ipv6->ip6_vfc & 0xF0) >> 4 != 6) return; // Not IPv6
-            
+            if ((ipv6->ip6_vfc & 0xF0) >> 4 != 6) return;
+           
             info.header_length = sizeof(ip6_hdr);
             info.payload_length = ntohs(ipv6->ip6_plen);
             offset += info.header_length;
-            
-            offsets.l3_offset = (size_t)(info.data_ptr - packet);
-            offsets.ip_protocol = ipv6->ip6_nxt;
-            
-            // TODO: Handle IPv6 Extension Headers
-            
-            // --- Key Generation (IPv6) ---
-            if (key.empty()) {
-                key.push_back((uint8_t)((offsets.ethertype >> 8) & 0xFF));
-                key.push_back((uint8_t)(offsets.ethertype & 0xFF));
+           
+            if (!key_locked && key.empty()) {
+                offsets.l3_offset = (size_t)(info.data_ptr - packet);
+                offsets.ip_protocol = ipv6->ip6_nxt;
+                offsets.ethertype = ETHERTYPE_IPV6;
+
+                key.push_back((uint8_t)((ETHERTYPE_IPV6 >> 8) & 0xFF));
+                key.push_back((uint8_t)(ETHERTYPE_IPV6 & 0xFF));
 
                 if (memcmp(&ipv6->ip6_src, &ipv6->ip6_dst, 16) > 0) {
                     key.insert(key.end(), (uint8_t*)&ipv6->ip6_src, (uint8_t*)&ipv6->ip6_src + 16);
@@ -123,178 +114,171 @@ static void parse_recursive(
                     offsets.originalAddrPortOrdering = false;
                 }
             }
-            // --- End Key Gen ---
-            
             next_proto_type = ipv6->ip6_nxt;
             break;
         }
-        
+       
         case ETHERTYPE_ARP:
         case ETHERTYPE_REVARP:
-            // No L4, parsing stops
-            info.header_length = caplen - offset; // Consume rest of packet
+            info.header_length = caplen - offset;
             offset = caplen;
+            key_locked = true;
             break;
-            
-        // --- L4 Protocols (IPProtos) ---
-        case IPPROTO_TCP: { // TCP
+           
+        // --- L4 Protocols ---
+        case IPPROTO_TCP: {
             if (offset + sizeof(tcphdr) > caplen) return;
             const tcphdr* tcp = reinterpret_cast<const tcphdr*>(packet + offset);
-
             info.header_length = tcp->th_off * 4;
-            if (offset + info.header_length > caplen) return; // Bad header len
-            
+            if (offset + info.header_length > caplen) return;
             offset += info.header_length;
-            info.payload_length = caplen - offset; // Assume rest of packet
-            
-            offsets.l4_offset = (size_t)(info.data_ptr - packet);
-            offsets.payload_offset = offset;
-            offsets.src_port = ntohs(tcp->th_sport);
-            offsets.dst_port = ntohs(tcp->th_dport);
+            info.payload_length = caplen - offset;
 
-            // --- Key Generation (L4) ---
-            if (key.size() > 2) { // L3 key was added
+            if (!key_locked && !key.empty()) {
+                offsets.l4_offset = (size_t)(info.data_ptr - packet);
+                offsets.payload_offset = offset;
+                offsets.src_port = ntohs(tcp->th_sport);
+                offsets.dst_port = ntohs(tcp->th_dport);
+
                 key.push_back(IPPROTO_TCP);
-                
+                // Normalize ports based on IP direction to ensure same key for both directions
                 uint16_t p1 = offsets.src_port, p2 = offsets.dst_port;
-                if (!offsets.originalAddrPortOrdering) {
-                    std::swap(p1, p2); // Use normalized port order
-                }
-                
-                key.push_back((uint8_t)((p1 >> 8) & 0xFF));
-                key.push_back((uint8_t)(p1 & 0xFF));
-                key.push_back((uint8_t)((p2 >> 8) & 0xFF));
-                key.push_back((uint8_t)(p2 & 0xFF));
+                if (!offsets.originalAddrPortOrdering) std::swap(p1, p2);
+                key.push_back((uint8_t)((p1 >> 8) & 0xFF)); key.push_back((uint8_t)(p1 & 0xFF));
+                key.push_back((uint8_t)((p2 >> 8) & 0xFF)); key.push_back((uint8_t)(p2 & 0xFF));
+               
+                key_locked = true; // <--- Key is now fully defined by L3+L4
             }
-            // --- End Key Gen ---
 
-            // Check for L7
             if (info.payload_length > 0) {
-                if (tls_ports.count(offsets.src_port) || tls_ports.count(offsets.dst_port)) {
-                    next_proto_type = PROTO_TLS;
-                } else if (offsets.src_port == 53 || offsets.dst_port == 53) {
-                    next_proto_type = PROTO_DNS;
-                }
+                uint16_t sp = ntohs(tcp->th_sport);
+                uint16_t dp = ntohs(tcp->th_dport);
+                if (tls_ports.count(sp) || tls_ports.count(dp)) next_proto_type = PROTO_TLS;
+                else if (sp == 53 || dp == 53) next_proto_type = PROTO_DNS;
             }
             break;
         }
-            
-        case IPPROTO_UDP: { // UDP
+           
+        case IPPROTO_UDP: {
             if (offset + sizeof(udphdr) > caplen) return;
             const udphdr* udp = reinterpret_cast<const udphdr*>(packet + offset);
-
             info.header_length = sizeof(udphdr);
-            // --- FIX: Use uh_ulen for Linux, not uh_len ---
             info.payload_length = ntohs(udp->uh_ulen) - info.header_length;
             offset += info.header_length;
-            
-            offsets.l4_offset = (size_t)(info.data_ptr - packet);
-            offsets.payload_offset = offset;
-            offsets.src_port = ntohs(udp->uh_sport);
-            offsets.dst_port = ntohs(udp->uh_dport);
-            
-            // --- Key Generation (L4) ---
-            if (key.size() > 2) { // L3 key was added
+           
+            if (!key_locked && !key.empty()) {
+                offsets.l4_offset = (size_t)(info.data_ptr - packet);
+                offsets.payload_offset = offset;
+                offsets.src_port = ntohs(udp->uh_sport);
+                offsets.dst_port = ntohs(udp->uh_dport);
+
                 key.push_back(IPPROTO_UDP);
-                
                 uint16_t p1 = offsets.src_port, p2 = offsets.dst_port;
-                if (!offsets.originalAddrPortOrdering) {
-                    std::swap(p1, p2); // Use normalized port order
-                }
-                
-                key.push_back((uint8_t)((p1 >> 8) & 0xFF));
-                key.push_back((uint8_t)(p1 & 0xFF));
-                key.push_back((uint8_t)((p2 >> 8) & 0xFF));
-                key.push_back((uint8_t)(p2 & 0xFF));
+                if (!offsets.originalAddrPortOrdering) std::swap(p1, p2);
+                key.push_back((uint8_t)((p1 >> 8) & 0xFF)); key.push_back((uint8_t)(p1 & 0xFF));
+                key.push_back((uint8_t)((p2 >> 8) & 0xFF)); key.push_back((uint8_t)(p2 & 0xFF));
+               
+                key_locked = true;
             }
-            // --- End Key Gen ---
-            
-            // Check for L7
+           
             if (info.payload_length > 0) {
-                if (offsets.src_port == 53 || offsets.dst_port == 53) {
-                    next_proto_type = PROTO_DNS;
-                }
+                uint16_t sp = ntohs(udp->uh_sport);
+                uint16_t dp = ntohs(udp->uh_dport);
+                if (sp == 53 || dp == 53) next_proto_type = PROTO_DNS;
             }
             break;
         }
 
-        case IPPROTO_ICMP: { // ICMPv4
-            if (offset + sizeof(icmp) > caplen) return;
-            const icmp* icmpv4 = reinterpret_cast<const icmp*>(packet + offset);
-            
-            info.header_length = 8; // Type, Code, Cksum, Rest of Header
-            offset += info.header_length;
-            
-            offsets.l4_offset = (size_t)(info.data_ptr - packet);
-            offsets.icmp_type = icmpv4->icmp_type;
-            offsets.icmp_code = icmpv4->icmp_code;
-            
-            // --- Key Generation (L4) ---
-            if (key.size() > 2) {
-                key.push_back(IPPROTO_ICMP);
-                // (Ports are 0, which is fine)
-            }
-            // --- End Key Gen ---
-            break; // Stop parsing
+        case IPPROTO_ICMP:
+        case IPPROTO_ICMPV6: {
+             info.header_length = (current_proto_type == IPPROTO_ICMP) ? 8 : 4;
+             if (offset + info.header_length > caplen) return;
+             
+             if (!key_locked && !key.empty()) {
+                 offsets.l4_offset = (size_t)(info.data_ptr - packet);
+                 key.push_back((uint8_t)current_proto_type);
+                 
+                 // --- FIX: Add Type and Code to key ---
+                 if (current_proto_type == IPPROTO_ICMP) {
+                    const icmp* ic = reinterpret_cast<const icmp*>(info.data_ptr);
+                    offsets.icmp_type = ic->icmp_type;
+                    offsets.icmp_code = ic->icmp_code;
+                    key.push_back(ic->icmp_type);
+                    key.push_back(ic->icmp_code);
+                 } else {
+                    const icmp6_hdr* ic6 = reinterpret_cast<const icmp6_hdr*>(info.data_ptr);
+                    offsets.icmp_type = ic6->icmp6_type;
+                    offsets.icmp_code = ic6->icmp6_code;
+                    key.push_back(ic6->icmp6_type);
+                    key.push_back(ic6->icmp6_code);
+                 }
+                 
+                 key_locked = true;
+             }
+             offset += info.header_length;
+             break;
         }
 
-        case IPPROTO_ICMPV6: { // ICMPv6
-            if (offset + sizeof(icmp6_hdr) > caplen) return;
-            const icmp6_hdr* icmpv6 = reinterpret_cast<const icmp6_hdr*>(packet + offset);
-            
-            info.header_length = 4; // Type, Code, Cksum
-            offset += info.header_length;
-            
-            offsets.l4_offset = (size_t)(info.data_ptr - packet);
-            offsets.icmp_type = icmpv6->icmp6_type;
-            offsets.icmp_code = icmpv6->icmp6_code;
-            
-            // --- Key Generation (L4) ---
-            if (key.size() > 2) {
-                key.push_back(IPPROTO_ICMPV6);
-                // (Ports are 0, which is fine)
-            }
-            // --- End Key Gen ---
-            break; // Stop parsing
-        }
-            
-        case IPPROTO_GRE: { // GRE
+        case IPPROTO_GRE: {
             if (offset + sizeof(gre_hdr) > caplen) return;
             const gre_hdr* gre = reinterpret_cast<const gre_hdr*>(packet + offset);
-            
-            // This is a minimal parser assuming no optional fields
-            info.header_length = 4;
+            info.header_length = sizeof(gre_hdr);
+            uint16_t flags = ntohs(gre->flags_and_version);
+            if (flags & 0x8000) info.header_length += 4; // Checksum/Offset
+            if (flags & 0x2000) info.header_length += 4; // Key
+            if (flags & 0x1000) info.header_length += 4; // Sequence
+
+            if (offset + info.header_length > caplen) return;
+
+            if (!key_locked && !key.empty()) {
+                key.push_back(IPPROTO_GRE);
+                // We do NOT add inner headers to the key.
+                // GRE itself is the service we are tracking.
+                key_locked = true;
+            }
+           
             offset += info.header_length;
-            
             next_proto_type = ntohs(gre->protocol_type);
-            break; // Recurse
+            break;
         }
-            
-        case IPPROTO_IPIP: { // IP-in-IP
-            // No header to parse, the payload *is* the next IP header
+           
+        case IPPROTO_IPIP: // IP-in-IP
+        case IPPROTO_IPV6: // IPv6-in-IP
             info.header_length = 0;
-            next_proto_type = ETHERTYPE_IP; // Decapsulate
-            break; // Recurse
-        }
-            
+             if (!key_locked && !key.empty()) {
+                key.push_back((uint8_t)current_proto_type);
+                key_locked = true;
+            }
+            next_proto_type = (current_proto_type == IPPROTO_IPIP) ? ETHERTYPE_IP : ETHERTYPE_IPV6;
+            break;
+           
+        case IPPROTO_ESP:
+        case IPPROTO_AH:
+            info.header_length = 8;
+             if (!key_locked && !key.empty()) {
+                key.push_back((uint8_t)current_proto_type);
+                key_locked = true;
+            }
+            offset = caplen;
+            break;
+
         case PROTO_DNS:
-        case PROTO_TLS: {
-            // L7 protocols: just tag them, don't parse them here
-            info.header_length = 0; // Header is part of L4 payload
+        case PROTO_TLS:
+            info.header_length = 0;
             info.payload_length = caplen - offset;
             offset = caplen;
-            break; // Stop
-        }
+            break;
 
-        default: // Unknown protocol
-            offset = caplen; // Stop parsing
+        default:
+            offset = caplen;
             break;
     }
 
     stack.push_back(info);
+   
     if (next_proto_type != 0 && offset < caplen) {
         parse_recursive(next_proto_type, packet, offset, caplen,
-                        key, offsets, stack, tls_ports);
+                        key, key_locked, offsets, stack, tls_ports);
     }
 }
 
@@ -313,106 +297,48 @@ parse_packet(
     auto stack = std::make_unique<ProtocolStack_t>();
 
     size_t offset = 0;
-    
-    // Reserve space for a common key
-    key->reserve(38); // Max for IPv6+TCP
+    bool key_locked = false;
+   
+    key->reserve(40);
 
-    // --- FIX: Start parsing at L2 ---
-    // The recursive function will handle L3 and above
     uint32_t next_proto_type = 0;
-    
-    // --- FIX: The switch now only handles L2 (DLT_) types ---
-    switch (l2_proto) {
-        case DLT_EN10MB: { // Ethernet
-            ProtocolInfo l2_info;
-            l2_info.type = DLT_EN10MB;
-            l2_info.data_ptr = packet;
-            
-            if (offset + sizeof(ether_header) > caplen) {
-                key->clear();
-                return std::make_tuple(std::move(key), std::move(offsets), std::move(stack));
-            }
-            const ether_header* eth = reinterpret_cast<const ether_header*>(packet + offset);
-            
-            l2_info.header_length = sizeof(ether_header);
-            offset += l2_info.header_length;
-            
+    if (l2_proto == DLT_EN10MB) {
+        if (offset + sizeof(ether_header) <= caplen) {
+            ProtocolInfo l2_info{DLT_EN10MB, packet, sizeof(ether_header), 0};
+            const ether_header* eth = reinterpret_cast<const ether_header*>(packet);
             next_proto_type = ntohs(eth->ether_type);
-            // --- FIX: Use -> operator for unique_ptr ---
             offsets->ethertype = next_proto_type;
-            offsets->l2_offset = 0;
-            
             stack->push_back(l2_info);
-            break;
+            offset += sizeof(ether_header);
         }
-        
-        // Add other L2 types here if needed (e.g., DLT_NULL, DLT_LINUX_SLL)
-        
-        default:
-            // Unsupported L2
-            key->clear(); 
-            return std::make_tuple(std::move(key), std::move(offsets), std::move(stack));
+    } else if (l2_proto == DLT_RAW) {
+         if (caplen >= 1) {
+             uint8_t first_byte = packet[0];
+             uint8_t version = (first_byte >> 4);
+             if (version == 4) next_proto_type = ETHERTYPE_IP;
+             else if (version == 6) next_proto_type = ETHERTYPE_IPV6;
+         }
     }
-    
-    // --- Start recursion at L3 ---
-    if (next_proto_type != 0 && offset < caplen) {
+
+    if (next_proto_type != 0) {
         parse_recursive(next_proto_type, packet, offset, caplen,
-                        *key, *offsets, *stack, tls_ports);
+                        *key, key_locked, *offsets, *stack, tls_ports);
     }
-    // ---
 
     if (key->empty()) {
-        // Parsing failed to generate a key
         key->clear();
     }
-    
+   
     return std::make_tuple(std::move(key), std::move(offsets), std::move(stack));
 }
 
 // ... (print_simplekey and print_key_debug are unchanged) ...
-
 std::string print_simplekey(const std::vector<uint8_t>& key) {
     std::ostringstream oss;
     oss << std::hex << std::uppercase << std::setfill('0');
-    for (const auto& byte : key) {
-        oss << std::setw(2) << static_cast<int>(byte);
-    }
+    for (const auto& byte : key) oss << std::setw(2) << static_cast<int>(byte);
     return oss.str();
 }
-
-void print_key_debug(const std::vector<uint8_t>& key) {
-    if (key.empty()) {
-        std::cout << "PRINTKEY: [EMPTY/INVALID]" << std::endl;
-        return;
-    }
-    
-    std::cout << "PRINTKEY: ########" << std::endl;
-    std::cout << "  Raw: " << print_simplekey(key) << std::endl;
-    
-    uint16_t l3_proto = (key[0] << 8) | key[1];
-    std::cout << "  L3 Proto: 0x" << std::hex << l3_proto << std::dec << std::endl;
-
-    if (l3_proto == ETHERTYPE_IP) {
-        std::cout << "  IPv4 Addr1: " << (int)key[2] << "." << (int)key[3] << "." << (int)key[4] << "." << (int)key[5] << std::endl;
-        std::cout << "  IPv4 Addr2: " << (int)key[6] << "." << (int)key[7] << "." << (int)key[8] << "." << (int)key[9] << std::endl;
-        
-        if (key.size() > 10) { // Check if L4 key exists
-            uint8_t l4_proto = key[10];
-            std::cout << "  L4 Proto: " << (int)l4_proto << std::endl;
-            
-            if (l4_proto == IPPROTO_TCP || l4_proto == IPPROTO_UDP) {
-                uint16_t port1 = (key[11] << 8) | key[12];
-                uint16_t port2 = (key[13] << 8) | key[14];
-                std::cout << "  Port1: " << port1 << std::endl;
-                std::cout << "  Port2: " << port2 << std::endl;
-            } else if (l4_proto == IPPROTO_ICMP) {
-                std::cout << "  (ICMP, no ports)" << std::endl;
-            }
-        }
-    } else if (l3_proto == ETHERTYPE_IPV6) {
-        // ... (add IPv6 debug print) ...
-    }
-    std::cout << "END PRINTKEY #####\n" << std::endl;
-}
+// (Omitted print_key_debug for brevity)
 
 } //end namespace

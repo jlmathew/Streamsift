@@ -3,7 +3,6 @@
  * @brief Defines packet parsing functions, protocol stack structures,
  * and 5-tuple key generation.
  */
-
 /*
  * Author: James Mathewson
  * Date: 6 November 2025
@@ -33,6 +32,7 @@
 #include <set>
 #include <unordered_map> // For VectorHash
 #include <functional> // For VectorHash
+#include <tuple> // For std::tuple
 
 // --- NEW Protocol Type Definitions ---
 // Using values outside the ETHERTYPE/IPPROTO range

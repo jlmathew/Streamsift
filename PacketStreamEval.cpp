@@ -1,12 +1,13 @@
 /**
  * @file PacketStreamEval.cpp
  * @brief Implementation of the PacketStreamEval class.
+ * PART 1 OF 3
  */
 
 /*
  * Author: James Mathewson
  * Date: 6 November 2025
- * Version: 0.7 beta 
+ * Version: 0.7 beta
  */
 
 
@@ -17,27 +18,26 @@
 #include <iomanip> // For std::setw
 #include <numeric> // For std::accumulate
 #include <cstdio>  // For std::remove
+#include <fstream> // For creating .detected files
 
 namespace pcapabvparser {
 
-// Constructor: Initialize from global options
+// Constructor
 PacketStreamEval::PacketStreamEval()
     : m_saveFilterIsSameAsTagFilter(false),
       m_saveFilterMatched(false),
+      m_detectedFileCreated(false),
       m_prePacketHistoryMax(globalOptions.bufferPacketsBefore),
       m_postPacketHistoryMax(globalOptions.bufferPacketsAfter),
-      // --- Per-direction state init ---
       m_triggerPacketSeen_ingress(false),
       m_currentPostPacketHistoryCnt_ingress(0),
       m_bufferedBytes_ingress(0),
       m_triggerPacketSeen_egress(false),
       m_currentPostPacketHistoryCnt_egress(0),
       m_bufferedBytes_egress(0),
-      // ---
       m_flushThresholdBytes(globalOptions.bufferSizePerStreamFlush),
-      m_myTimeout(60) // Default timeout
+      m_myTimeout(60)
 {
-    // Set the stream mode from global options
     m_streamMode = (globalOptions.streamMode == "separate") 
                    ? StreamMode::SEPARATE 
                    : StreamMode::COMBINED;
@@ -50,23 +50,15 @@ PacketStreamEval::PacketStreamEval()
 
 // Destructor
 PacketStreamEval::~PacketStreamEval() {
-    // Summary is printed by cleanupOnExpiry(), which is called
-    // by the consumer thread before this object is destroyed.
     Logger::log("Stream " + m_id + " destroyed.");
 }
 
 void PacketStreamEval::setId(const std::string& id) {
     m_id = id;
-    // This is now a BASE name.
-    // .pcap, _client.pcap, or _server.pcap will be added later.
     m_fileNameBase = globalOptions.preName + "_" + m_id;
 }
 
-/**
- * @brief Creates protocol triggers, clones the ASTs, binds them, and sets timeout.
- */
 void PacketStreamEval::registerAndBindAST(const ASTNode* tagRoot, const ASTNode* saveRoot, const TimeoutMap& timeoutMap) {
-    // --- 1. Create all protocol triggers ---
     m_protocolsUsed["IP"] = protoIpv4Trigger::create();
     m_protocolsUsed["TCP"] = protoTcpTrigger::create();
     m_protocolsUsed["UDP"] = protoUdpTrigger::create();
@@ -74,86 +66,70 @@ void PacketStreamEval::registerAndBindAST(const ASTNode* tagRoot, const ASTNode*
     m_protocolsUsed["GRE"] = protoGreTrigger::create();
     m_protocolsUsed["DNS"] = protoDnsTrigger::create();
     m_protocolsUsed["TLS"] = protoTlsTrigger::create();
-    // ... add IPv6 etc. ...
 
-    // --- 2. Clone and Bind TAG AST ---
     if (tagRoot) {
-        // --- FIX: .reset() expects a raw pointer, use .release() ---
         m_boundTagAst.reset(tagRoot->clone().release());
+        bindAstRecursive(m_boundTagAst.get());
     } else {
         Logger::log("Error: Cannot bind a null TAG AST.");
         return;
     }
     
-    // --- 3. Clone and Bind SAVE AST ---
     if (saveRoot == tagRoot) {
-        // Optimization: Save filter is same as tag filter
         m_saveFilterIsSameAsTagFilter = true;
-        m_boundSaveAst = nullptr; // No need for a second copy
+        m_boundSaveAst = nullptr;
     } else if (saveRoot) {
-        // --- FIX: .reset() expects a raw pointer, use .release() ---
         m_boundSaveAst.reset(saveRoot->clone().release());
+        bindAstRecursive(m_boundSaveAst.get());
     } else {
         Logger::log("Error: Cannot bind a null SAVE AST.");
         return;
     }
 
-    // --- 4. Determine this stream's timeout ---
     determineTimeout(timeoutMap);
 }
 
-/**
- * @brief Recursive helper to walk the AST and bind functions.
- */
 void PacketStreamEval::bindAstRecursive(ASTNode* node) {
     if (!node) return;
 
     if (auto* func = dynamic_cast<FuncCallNode*>(node)) {
-        // This is a function. Find it and bind it.
         Func* func_ptr = nullptr;
         for (auto const& [name, trigger_ptr] : m_protocolsUsed) {
             func_ptr = trigger_ptr->findFunction(func->name);
-            if (func_ptr) {
-                break; // Found it
-            }
+            if (func_ptr) break;
         }
 
         if (func_ptr) {
-            // Success! Store the pointer.
             func->m_bound_function_ptr = func_ptr;
         } else {
-            // --- NEW: Handle missing function ---
-            // Function not found. Bind a dummy "error" lambda.
             std::string func_name = func->name;
             std::string stream_id = m_id;
-            
-            // Create and store the error lambda so it has a stable address
             m_errorFuncs[func_name] = [func_name, stream_id](const std::vector<int>&) {
                 Logger::log("Stream " + stream_id + ": Error: Function '" + func_name + "' not defined.");
-                return 0; // Return default 0
+                return 0;
             };
-            
-            // Bind the FuncCallNode to the error lambda we just stored
             func->m_bound_function_ptr = &m_errorFuncs[func_name];
         }
 
-        // Recurse into arguments
         for (auto& arg : func->args) {
             bindAstRecursive(arg.get());
         }
 
     } else if (auto* unary = dynamic_cast<UnaryNode*>(node)) {
-        // Recurse into operand
         bindAstRecursive(unary->operand.get());
-
     } else if (auto* binary = dynamic_cast<BinaryNode*>(node)) {
-        // Recurse into both sides
         bindAstRecursive(binary->left.get());
         bindAstRecursive(binary->right.get());
     }
-    // (ConstNode has no children, so no 'else' needed)
 }
 
+/**
+ * @file PacketStreamEval.cpp
+ * @brief Implementation of the PacketStreamEval class.
+ * PART 2 OF 3
+ */
+
+// ... (previous includes and functions from Part 1) ...
 
 /**
  * @brief Evaluates a new packet against the pre-bound ASTs.
@@ -225,8 +201,28 @@ void PacketStreamEval::evaluatePacket(pcap_pkthdr* hdr, uint8_t* data, PacketOff
                 m_saveFilterMatched = true;
             }
         }
+
+        // --- NEW LOGIC: Create .detected file immediately on first match ---
+        if (m_saveFilterMatched && globalOptions.createDetectedFile && !m_detectedFileCreated) {
+            std::string detectedFilename = m_fileNameBase + ".detected";
+            // Create empty file
+            std::ofstream outfile(detectedFilename);
+            outfile.close();
+            
+            m_detectedFileCreated = true;
+            Logger::log("Stream " + m_id + ": Save criteria met. Created alert file: " + detectedFilename);
+        }
+        // -------------------------------------------------------------------
     }
 }
+
+/**
+ * @file PacketStreamEval.cpp
+ * @brief Implementation of the PacketStreamEval class.
+ * PART 3 OF 3
+ */
+
+// ... (previous includes and functions from Parts 1 & 2) ...
 
 /**
  * @brief Internal helper to manage buffering logic for one direction.
@@ -376,12 +372,12 @@ void PacketStreamEval::cleanupOnExpiry() {
         // This is the only place we delete. flushPacketsToDisk() always writes.
         if (m_streamMode == StreamMode::COMBINED) {
             std::string filename = m_fileNameBase + ".pcap";
-            Logger::log("Stream " + m_id + ": Save filter not matched. Deleting: " + filename);
+            // Logger::log("Stream " + m_id + ": Save filter not matched. Deleting: " + filename);
             std::remove(filename.c_str());
         } else {
             std::string f_ingress = m_fileNameBase + "_client.pcap";
             std::string f_egress = m_fileNameBase + "_server.pcap";
-            Logger::log("Stream " + m_id + ": Save filter not matched. Deleting: " + f_ingress + " and " + f_egress);
+            // Logger::log("Stream " + m_id + ": Save filter not matched. Deleting: " + f_ingress + " and " + f_egress);
             std::remove(f_ingress.c_str());
             std::remove(f_egress.c_str());
         }
@@ -397,11 +393,11 @@ void PacketStreamEval::printSummary() const {
     std::lock_guard<std::mutex> lock(m_gapVectorMutex); // Protects gaps/histogram
 
     std::ostringstream oss;
-    oss << "\n--- Stream Summary: " << m_id << " ---\n";
-    oss << "  Total Packets Rcvd: " << m_totalPacketsReceived << "\n";
-    oss << "  Total Bytes Rcvd:   " << m_totalBytesReceived << "\n";
-    oss << "  Total Packets Saved:  " << m_totalPacketsSaved.load() << "\n";
-    oss << "  Save Filter Matched: " << (m_saveFilterMatched ? "YES" : "NO") << "\n";
+    oss << "\n--- Stream Summary: " << m_id << " ---\n"
+        << "  Total Packets Rcvd: " << m_totalPacketsReceived << "\n"
+        << "  Total Bytes Rcvd:   " << m_totalBytesReceived << "\n"
+        << "  Total Packets Saved:  " << m_totalPacketsSaved.load() << "\n"
+        << "  Save Filter Matched: " << (m_saveFilterMatched ? "YES" : "NO") << "\n";
 
     if (!m_interPacketGaps.empty()) {
         uint64_t sum = std::accumulate(m_interPacketGaps.begin(), m_interPacketGaps.end(), 0ULL);

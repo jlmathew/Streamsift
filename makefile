@@ -31,7 +31,7 @@ CXXFLAGS = -std=c++17 $(OPT_LEVEL) -g -Wall -pthread
 LDFLAGS = -lpcap -pthread
 
 # Executable name
-TARGET = pcap_parser
+TARGET = streamsift
 
 # Source files (.cpp)
 SRCS = \
