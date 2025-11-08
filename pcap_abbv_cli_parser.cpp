@@ -114,6 +114,10 @@ const std::vector<std::tuple<std::string, std::string, std::string, std::functio
         [](const char* arg) { globalOptions.interfaceName = arg; }
     },
     {
+	"--create-detected", "-d", "create empty .detected file when save criteria is met",
+	[](const char* arg) { globalOptions.createDetectedFile=(strncmp(arg,"true",4)==0); }
+    },
+    {
         "--help", "-h", "print out help ",
         [](const char*) { printHelp(); globalOptions.printOptions(); exit(0); }
     },

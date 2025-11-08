@@ -1,14 +1,9 @@
 /**
  * @file Globals.h
- * @brief Defines global variables, primarily for cross-thread signaling.
+ * @author James Mathewson
+ * @version 0.9.11 beta
+ * @brief Defines global variables, primarily for cross-thread signaling and stats.
  */
-
-/*
- * Author: James Mathewson
- * Date: 6 November 2025
- * Version: 0.7 beta 
- */
-
 
 #ifndef __GLOBALS_H__
 #define __GLOBALS_H__
@@ -17,10 +12,13 @@
 
 /**
  * @brief Global atomic flag to signal all threads to shut down.
- *
- * It is declared 'extern' here and defined in main.cpp.
- * Threads should check this flag in their main loops to exit gracefully.
  */
 extern std::atomic<bool> g_done;
+
+// --- Global Debug Counters ---
+extern std::atomic<uint64_t> g_total_packets_read;
+extern std::atomic<uint64_t> g_total_packets_dropped;
+extern std::atomic<uint64_t> g_total_streams_created;
+extern std::atomic<uint64_t> g_total_streams_saved;
 
 #endif // __GLOBALS_H__

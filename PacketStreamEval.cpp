@@ -1,24 +1,27 @@
 /**
  * @file PacketStreamEval.cpp
+ * @author James Mathewson
+ * @version 0.9.17 beta
  * @brief Implementation of the PacketStreamEval class.
- * PART 1 OF 3
  */
-
-/*
- * Author: James Mathewson
- * Date: 6 November 2025
- * Version: 0.7 beta
- */
-
 
 #include "PacketStreamEval.h"
 #include "pcap_abbv_cli_parser.h" // For globalOptions
 #include "Logger.h"
+#include "Globals.h"
 #include <iostream>
 #include <iomanip> // For std::setw
 #include <numeric> // For std::accumulate
 #include <cstdio>  // For std::remove
 #include <fstream> // For creating .detected files
+
+// --- Debug Macro ---
+// #define DEBUG_EVAL
+#ifdef DEBUG_EVAL
+    #define LOG_DEBUG(msg) Logger::log("[DEBUG][EVAL] " + std::string(msg))
+#else
+    #define LOG_DEBUG(msg) do {} while(0)
+#endif
 
 namespace pcapabvparser {
 
@@ -38,8 +41,8 @@ PacketStreamEval::PacketStreamEval()
       m_flushThresholdBytes(globalOptions.bufferSizePerStreamFlush),
       m_myTimeout(60)
 {
-    m_streamMode = (globalOptions.streamMode == "separate") 
-                   ? StreamMode::SEPARATE 
+    m_streamMode = (globalOptions.streamMode == "separate")
+                   ? StreamMode::SEPARATE
                    : StreamMode::COMBINED;
 
     m_lastPacketTimestamp = {0, 0};
@@ -50,7 +53,7 @@ PacketStreamEval::PacketStreamEval()
 
 // Destructor
 PacketStreamEval::~PacketStreamEval() {
-    Logger::log("Stream " + m_id + " destroyed.");
+    LOG_DEBUG("Stream " + m_id + " destroyed.");
 }
 
 void PacketStreamEval::setId(const std::string& id) {
@@ -74,7 +77,7 @@ void PacketStreamEval::registerAndBindAST(const ASTNode* tagRoot, const ASTNode*
         Logger::log("Error: Cannot bind a null TAG AST.");
         return;
     }
-    
+   
     if (saveRoot == tagRoot) {
         m_saveFilterIsSameAsTagFilter = true;
         m_boundSaveAst = nullptr;
@@ -88,6 +91,7 @@ void PacketStreamEval::registerAndBindAST(const ASTNode* tagRoot, const ASTNode*
 
     determineTimeout(timeoutMap);
 }
+
 
 void PacketStreamEval::bindAstRecursive(ASTNode* node) {
     if (!node) return;
@@ -123,32 +127,17 @@ void PacketStreamEval::bindAstRecursive(ASTNode* node) {
     }
 }
 
-/**
- * @file PacketStreamEval.cpp
- * @brief Implementation of the PacketStreamEval class.
- * PART 2 OF 3
- */
-
-// ... (previous includes and functions from Part 1) ...
-
-/**
- * @brief Evaluates a new packet against the pre-bound ASTs.
- */
 void PacketStreamEval::evaluatePacket(pcap_pkthdr* hdr, uint8_t* data, PacketOffsets_t* offsets, const ProtocolStack_t* stack) {
-    // --- Update Stats ---
     m_totalPacketsReceived++;
     m_totalBytesReceived += hdr->len;
 
-    // Calculate inter-packet gap and update histogram
     if (m_lastPacketTimestamp.tv_sec != 0) {
         uint64_t current_ts_us = (uint64_t)hdr->ts.tv_sec * 1000000 + hdr->ts.tv_usec;
         uint64_t last_ts_us = (uint64_t)m_lastPacketTimestamp.tv_sec * 1000000 + m_lastPacketTimestamp.tv_usec;
         uint64_t gap = (current_ts_us > last_ts_us) ? (current_ts_us - last_ts_us) : 0;
-        
+       
         std::lock_guard<std::mutex> lock(m_gapVectorMutex);
         m_interPacketGaps.push_back(gap);
-        
-        // Find the correct bucket
         for (auto bucket : m_latencyBuckets) {
             if (gap <= bucket) {
                 m_latencyHistogram[bucket]++;
@@ -158,291 +147,192 @@ void PacketStreamEval::evaluatePacket(pcap_pkthdr* hdr, uint8_t* data, PacketOff
     }
     m_lastPacketTimestamp = hdr->ts;
 
-    // --- Set Packet Context ---
     for (auto const& [name, trigger_ptr] : m_protocolsUsed) {
         trigger_ptr->setCurrentPacket(offsets, data, stack);
     }
 
-    // --- 1. Evaluate "Tag" Filter ---
-    if (!m_boundTagAst) return;
-    int tag_result = m_boundTagAst->eval();
-    
-    if (tag_result != 0) {
-        bool isIngress = offsets->originalAddrPortOrdering;
-        if (m_streamMode == StreamMode::COMBINED) {
-            if (!m_triggerPacketSeen_ingress) {
-                m_triggerPacketSeen_ingress = true;
-                m_currentPostPacketHistoryCnt_ingress = m_postPacketHistoryMax;
-            }
-        } else { // SEPARATE mode
-            if (isIngress) {
-                if (!m_triggerPacketSeen_ingress) {
-                    m_triggerPacketSeen_ingress = true;
-                    m_currentPostPacketHistoryCnt_ingress = m_postPacketHistoryMax;
-                }
-            } else {
-                if (!m_triggerPacketSeen_egress) {
-                    m_triggerPacketSeen_egress = true;
-                    m_currentPostPacketHistoryCnt_egress = m_postPacketHistoryMax;
-                }
+    int tag_result = 0;
+    if (m_boundTagAst) {
+        tag_result = m_boundTagAst->eval();
+        if (tag_result != 0) {
+             bool isIngress = offsets->originalAddrPortOrdering;
+             if (m_streamMode == StreamMode::COMBINED) {
+                 if (!m_triggerPacketSeen_ingress) {
+                     m_triggerPacketSeen_ingress = true;
+                     m_currentPostPacketHistoryCnt_ingress = m_postPacketHistoryMax;
+                 }
+             } else {
+                 if (isIngress) {
+                     if (!m_triggerPacketSeen_ingress) {
+                         m_triggerPacketSeen_ingress = true;
+                         m_currentPostPacketHistoryCnt_ingress = m_postPacketHistoryMax;
+                     }
+                 } else {
+                     if (!m_triggerPacketSeen_egress) {
+                         m_triggerPacketSeen_egress = true;
+                         m_currentPostPacketHistoryCnt_egress = m_postPacketHistoryMax;
+                     }
+                 }
+             }
+        }
+    }
+   
+    if (!m_saveFilterMatched) {
+        bool matched_now = false;
+        if (m_saveFilterIsSameAsTagFilter) {
+            if (tag_result != 0) matched_now = true;
+        } else if (m_boundSaveAst) {
+            if (m_boundSaveAst->eval() != 0) matched_now = true;
+        }
+
+        if (matched_now) {
+            m_saveFilterMatched = true;
+            if (globalOptions.createDetectedFile && !m_detectedFileCreated) {
+                std::string detectedFilename = m_fileNameBase + ".detected";
+                std::ofstream outfile(detectedFilename);
+                outfile.close();
+                m_detectedFileCreated = true;
+                LOG_DEBUG("Stream " + m_id + ": Alert file created: " + detectedFilename);
             }
         }
     }
-    
-    // --- 2. Evaluate "Save" Filter ---
-    if (!m_saveFilterMatched) {
-        if (m_saveFilterIsSameAsTagFilter) {
-            if (tag_result != 0) {
-                m_saveFilterMatched = true; // Tag match = Save match
-            }
-        } else if (m_boundSaveAst) { // Check if it's not null
-            int save_result = m_boundSaveAst->eval();
-            if (save_result != 0) {
-                m_saveFilterMatched = true;
-            }
-        }
 
-        // --- NEW LOGIC: Create .detected file immediately on first match ---
-        if (m_saveFilterMatched && globalOptions.createDetectedFile && !m_detectedFileCreated) {
-            std::string detectedFilename = m_fileNameBase + ".detected";
-            // Create empty file
-            std::ofstream outfile(detectedFilename);
-            outfile.close();
-            
-            m_detectedFileCreated = true;
-            Logger::log("Stream " + m_id + ": Save criteria met. Created alert file: " + detectedFilename);
-        }
-        // -------------------------------------------------------------------
+    for (auto const& [name, trigger_ptr] : m_protocolsUsed) {
+        trigger_ptr->setCurrentPacket(nullptr, nullptr, nullptr);
     }
 }
 
-/**
- * @file PacketStreamEval.cpp
- * @brief Implementation of the PacketStreamEval class.
- * PART 3 OF 3
- */
+void PacketStreamEval::transferPacket(std::unique_ptr<pcap_pkthdr>&& header, std::unique_ptr<uint8_t[]>&& data, bool isIngress) {
+    if (m_streamMode == StreamMode::COMBINED) {
+        transferPacketToBuffer(m_packetHistory_ingress, m_triggerPacketSeen_ingress, m_currentPostPacketHistoryCnt_ingress, m_bufferedBytes_ingress, std::move(header), std::move(data));
+    } else {
+        if (isIngress) {
+            transferPacketToBuffer(m_packetHistory_ingress, m_triggerPacketSeen_ingress, m_currentPostPacketHistoryCnt_ingress, m_bufferedBytes_ingress, std::move(header), std::move(data));
+        } else {
+            transferPacketToBuffer(m_packetHistory_egress, m_triggerPacketSeen_egress, m_currentPostPacketHistoryCnt_egress, m_bufferedBytes_egress, std::move(header), std::move(data));
+        }
+    }
+}
 
-// ... (previous includes and functions from Parts 1 & 2) ...
-
-/**
- * @brief Internal helper to manage buffering logic for one direction.
- */
-void PacketStreamEval::transferPacketToBuffer(
-    PacketBuffer& buffer,
-    bool& triggerSeen,
-    uint32_t& postPktCnt,
-    size_t& bufferedBytes,
-    std::unique_ptr<pcap_pkthdr>&& header, 
-    std::unique_ptr<uint8_t[]>&& data
-) {
+void PacketStreamEval::transferPacketToBuffer(PacketBuffer& buffer, bool& triggerSeen, uint32_t& postPktCnt, size_t& bufferedBytes, std::unique_ptr<pcap_pkthdr>&& header, std::unique_ptr<uint8_t[]>&& data) {
     size_t packet_size = header->caplen;
     bufferedBytes += packet_size;
 
     if (!triggerSeen) {
-        // STATE 1: Looking for a "Tag"
         buffer.emplace_back(std::move(header), std::move(data));
         while (buffer.size() > m_prePacketHistoryMax) {
             bufferedBytes -= buffer.front().first->caplen;
-            buffer.pop_front(); 
+            buffer.pop_front();
         }
     } else {
-        // STATE 2: "Tag" Seen, Saving 'Post' Packets
         if (postPktCnt > 0) {
             buffer.emplace_back(std::move(header), std::move(data));
             postPktCnt--;
-
             if (postPktCnt == 0) {
-                // Last packet saved. Reset trigger.
-                triggerSeen = false;
+                 triggerSeen = false;
             }
         }
     }
 
-    // Byte-based flush
     if (bufferedBytes > m_flushThresholdBytes) {
-        Logger::log("Stream " + m_id + ": Reached flush threshold (" 
-                  + std::to_string(bufferedBytes) + " bytes). Flushing.");
+        LOG_DEBUG("Stream " + m_id + ": Reached flush threshold (" + std::to_string(bufferedBytes) + " bytes). Flushing.");
         flushPacketsToDisk();
     }
 }
 
-/**
- * @brief Main dispatcher for transferring packets.
- */
-void PacketStreamEval::transferPacket(std::unique_ptr<pcap_pkthdr>&& header, std::unique_ptr<uint8_t[]>&& data, bool isIngress) {
-    
-    if (m_streamMode == StreamMode::COMBINED) {
-        // Use ingress buffer for everything
-        transferPacketToBuffer(
-            m_packetHistory_ingress,
-            m_triggerPacketSeen_ingress,
-            m_currentPostPacketHistoryCnt_ingress,
-            m_bufferedBytes_ingress,
-            std::move(header),
-            std::move(data)
-        );
-    } else {
-        // SEPARATE mode
-        if (isIngress) {
-            transferPacketToBuffer(
-                m_packetHistory_ingress,
-                m_triggerPacketSeen_ingress,
-                m_currentPostPacketHistoryCnt_ingress,
-                m_bufferedBytes_ingress,
-                std::move(header),
-                std::move(data)
-            );
-        } else { // Egress
-            transferPacketToBuffer(
-                m_packetHistory_egress,
-                m_triggerPacketSeen_egress,
-                m_currentPostPacketHistoryCnt_egress,
-                m_bufferedBytes_egress,
-                std::move(header),
-                std::move(data)
-            );
-        }
-    }
-}
 
 
-/**
- * @brief Internal helper to flush a single buffer.
- */
 void PacketStreamEval::flushBufferToFile(PacketBuffer& buffer, size_t& bufferedBytes, const std::string& filename) {
     if (buffer.empty()) return;
-
-    // This check is now redundant, as we only call this if m_saveFilterMatched is true
-    // OR from cleanupOnExpiry, which handles the delete.
-    // For safety, we'll check the save flag *before* logging.
     if (!m_saveFilterMatched) {
         buffer.clear();
         bufferedBytes = 0;
         return;
     }
-    
-    Logger::log("Stream " + m_id + ": Flushing " 
-              + std::to_string(buffer.size()) 
-              + " packets to " + filename);
-    
-    // *** Actual pcap_dump logic would go here ***
-    // NOTE: You need a pcap_t handle to create a dumper.
-    // pcap_t* pcap_handle = pcap_open_dead(DLT_EN10MB, 65535);
-    // pcap_dumper_t* dumper = pcap_dump_open_append(pcap_handle, filename.c_str());
-    // if (dumper) {
-    //    for (auto& pair : buffer) {
-    //        pcap_dump((u_char*)dumper, pair.first.get(), pair.second.get());
-    //    }
-    //    pcap_dump_close(dumper);
-    // }
-    // pcap_close(pcap_handle);
-    
+   
+    LOG_DEBUG("Stream " + m_id + ": Flushing " + std::to_string(buffer.size()) + " packets to " + filename);
+   
+    pcap_t* pd = pcap_open_dead(DLT_EN10MB, 65535);
+    if (!pd) {
+        Logger::log("Error: Could not create dead pcap handle for flushing.");
+        return;
+    }
+
+    // NOTE: Standard libpcap doesn't have a clean "append" for savefiles.
+    // We'll stick to standard open (overwrite) for now.
+    // In a real production system, we'd keep the dumper open.
+    pcap_dumper_t* pdumper = pcap_dump_open(pd, filename.c_str());
+    if (!pdumper) {
+        Logger::log("Error: Could not open pcap dumper for " + filename + ": " + pcap_geterr(pd));
+        pcap_close(pd);
+        return;
+    }
+
+    for (const auto& pair : buffer) {
+        pcap_dump(reinterpret_cast<u_char*>(pdumper), pair.first.get(), pair.second.get());
+    }
+
+    pcap_dump_close(pdumper);
+    pcap_close(pd);
+
     m_totalPacketsSaved += buffer.size();
     buffer.clear();
     bufferedBytes = 0;
 }
 
-
 void PacketStreamEval::flushPacketsToDisk() {
     if (m_streamMode == StreamMode::COMBINED) {
-        std::string filename = m_fileNameBase + ".pcap";
-        flushBufferToFile(m_packetHistory_ingress, m_bufferedBytes_ingress, filename);
+        flushBufferToFile(m_packetHistory_ingress, m_bufferedBytes_ingress, m_fileNameBase + ".pcap");
     } else {
-        std::string f_ingress = m_fileNameBase + "_client.pcap";
-        std::string f_egress = m_fileNameBase + "_server.pcap";
-        flushBufferToFile(m_packetHistory_ingress, m_bufferedBytes_ingress, f_ingress);
-        flushBufferToFile(m_packetHistory_egress, m_bufferedBytes_egress, f_egress);
+        flushBufferToFile(m_packetHistory_ingress, m_bufferedBytes_ingress, m_fileNameBase + "_client.pcap");
+        flushBufferToFile(m_packetHistory_egress, m_bufferedBytes_egress, m_fileNameBase + "_server.pcap");
     }
 }
 
-/**
- * @brief Runs final logic on stream expiry.
- */
 void PacketStreamEval::cleanupOnExpiry() {
-    // 1. Flush any remaining packets (this only writes if m_saveFilterMatched is true)
     flushPacketsToDisk();
-    
-    // 2. Print summary (if enabled)
-    if (globalOptions.streamSummary) {
+   
+    if (globalOptions.streamSummary && m_saveFilterMatched) {
         printSummary();
     }
-    
-    // 3. Check save flag and delete file(s) if not matched
+   
     if (!m_saveFilterMatched) {
-        // This is the only place we delete. flushPacketsToDisk() always writes.
+        // Cleanup pcap files if we didn't match the save filter
         if (m_streamMode == StreamMode::COMBINED) {
-            std::string filename = m_fileNameBase + ".pcap";
-            // Logger::log("Stream " + m_id + ": Save filter not matched. Deleting: " + filename);
-            std::remove(filename.c_str());
+            std::remove((m_fileNameBase + ".pcap").c_str());
         } else {
-            std::string f_ingress = m_fileNameBase + "_client.pcap";
-            std::string f_egress = m_fileNameBase + "_server.pcap";
-            // Logger::log("Stream " + m_id + ": Save filter not matched. Deleting: " + f_ingress + " and " + f_egress);
-            std::remove(f_ingress.c_str());
-            std::remove(f_egress.c_str());
+            std::remove((m_fileNameBase + "_client.pcap").c_str());
+            std::remove((m_fileNameBase + "_server.pcap").c_str());
+        }
+        // Cleanup the .detected file if it exists
+        if (m_detectedFileCreated) {
+             std::remove((m_fileNameBase + ".detected").c_str());
         }
     } else {
-        Logger::log("Stream " + m_id + ": Save filter matched. Keeping files.");
+        g_total_streams_saved.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
-/**
- * @brief Prints the collected statistics for this stream to the logger.
- */
 void PacketStreamEval::printSummary() const {
-    std::lock_guard<std::mutex> lock(m_gapVectorMutex); // Protects gaps/histogram
-
+    std::lock_guard<std::mutex> lock(m_gapVectorMutex);
     std::ostringstream oss;
     oss << "\n--- Stream Summary: " << m_id << " ---\n"
         << "  Total Packets Rcvd: " << m_totalPacketsReceived << "\n"
-        << "  Total Bytes Rcvd:   " << m_totalBytesReceived << "\n"
         << "  Total Packets Saved:  " << m_totalPacketsSaved.load() << "\n"
         << "  Save Filter Matched: " << (m_saveFilterMatched ? "YES" : "NO") << "\n";
-
-    if (!m_interPacketGaps.empty()) {
-        uint64_t sum = std::accumulate(m_interPacketGaps.begin(), m_interPacketGaps.end(), 0ULL);
-        uint64_t avg = sum / m_interPacketGaps.size();
-        auto minmax = std::minmax_element(m_interPacketGaps.begin(), m_interPacketGaps.end());
-        
-        oss << "  Inter-Packet Gap (us):\n";
-        oss << "    Avg: " << avg << " | Min: " << *minmax.first << " | Max: " << *minmax.second << "\n";
-        oss << "  Latency Histogram (us):\n";
-        for (auto const& [bucket, count] : m_latencyHistogram) {
-            oss << "    <= " << std::setw(7) << bucket << " : " << count << " packets\n";
-        }
-    }
-    oss << "--------------------------------------\n";
-    Logger::log(oss.str()); // Use logger so it's thread-safe
+    Logger::log(oss.str());
 }
 
-/**
- * @brief Sets this stream's timeout based on its protocols.
- *
- * This checks the protocols used in the filter (m_protocolsUsed)
- * and selects the "longest" timeout, as TCP is stateful.
- * You can change this logic (e.g., to "shortest") if you prefer.
- */
 void PacketStreamEval::determineTimeout(const TimeoutMap& timeoutMap) {
-    auto default_it = timeoutMap.find(0); // 0 == DEFAULT
+    auto default_it = timeoutMap.find(0);
     m_myTimeout = default_it->second;
-
-    // Find the longest timeout for the protocols this stream uses
-    // A more complex way would be to inspect the ProtocolStack_t
-    // For now, we base it on the *triggers* created.
-    
     if (m_protocolsUsed.count("TCP")) {
         auto it = timeoutMap.find(IPPROTO_TCP);
-        if (it != timeoutMap.end() && it->second > m_myTimeout) {
-            m_myTimeout = it->second;
-        }
+        if (it != timeoutMap.end() && it->second > m_myTimeout) m_myTimeout = it->second;
     } else if (m_protocolsUsed.count("UDP")) {
         auto it = timeoutMap.find(IPPROTO_UDP);
-        if (it != timeoutMap.end() && it->second > m_myTimeout) {
-            m_myTimeout = it->second;
-        }
+        if (it != timeoutMap.end() && it->second > m_myTimeout) m_myTimeout = it->second;
     }
-    
-    Logger::log("Stream " + m_id + ": Set timeout to " + std::to_string(m_myTimeout.count()) + "s");
 }
 
 } // namespace pcapabvparser
