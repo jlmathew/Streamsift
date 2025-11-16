@@ -1,15 +1,9 @@
 /**
  * @file pcap_abbv_cli_parser.h
+ * @author James Mathewson
+ * @version 0.9.22 beta
  * @brief Defines the command-line parser and global options struct.
- * @version 0.9.1
  */
-
-/*
- * Author: James Mathewson
- * Date: 6 November 2025
- * Version: 0.7 beta
- */
-
 
 #ifndef PCAP_ABBV_CLI_PARSER_H
 #define PCAP_ABBV_CLI_PARSER_H
@@ -53,13 +47,26 @@ struct globalOptions_t
     uint32_t numConsumerThreads;
     uint32_t snapshotLength;
     std::set<uint16_t> tlsPorts;
+    std::set<uint16_t> dnsPorts;
     std::string streamMode;
+    bool createDetectedFile;
 
     /**
-     * @brief If true, immediately creates an empty .detected file when save criteria are met.
-     * This serves as a real-time flag for external monitoring systems.
+     * @brief If true, truncate TLS packets to only headers and Alerts.
+     * Removes potentially sensitive application data.
      */
-    bool createDetectedFile; // <-- NEW
+    bool truncateTlsData;
+
+    /**
+     * @brief Set of TLS Alert Descriptions (1-byte codes, 0x00 - 0xFF)
+     * that should NOT be truncated, e.g., CloseNotify (0x00).
+     */
+    std::set<uint8_t> redactAlertExceptions;
+
+    /**
+     * @brief If true, merges all saved individual .pcap files into one master file, sorted by timestamp.
+     */
+    bool mergeOutputFiles;
 
     /**
      * @brief Default constructor setting all default values.
@@ -76,39 +83,27 @@ struct globalOptions_t
         numConsumerThreads(1),
         snapshotLength(65535),
         streamMode("combined"),
-        createDetectedFile(false) // <-- Default to false
+        createDetectedFile(false),
+        truncateTlsData(false),
+        mergeOutputFiles(false)
     {
         tlsPorts.insert(443);
+        dnsPorts.insert(53);
+        redactAlertExceptions.insert(0);
     }
-    
+
     /**
      * @brief Prints all currently set options to std::cout.
      */
     void printOptions()
     {
         std::cout << "Current Global Options:\n"
-                  << "  (bufferSizePerTotalFlush): " << bufferSizePerTotalFlush << "\n"
                   << "  (bufferPacketsBefore): " << bufferPacketsBefore << "\n"
-                  << "  (bufferPacketsAfter): " << bufferPacketsAfter << "\n"
-                  << "  (bufferSizePerStreamFlush): " << bufferSizePerStreamFlush << "\n"
-                  << "  (combinePacketsIntoPcap): " << (combinePacketsIntoPcap ? "true" : "false") << "\n"
-                  << "  (streamSummary): " << (streamSummary ? "true" : "false") << "\n"
-                  << "  (preName): " << preName << "\n"
-                  << "  (pcapPacketOfInterestFilter): " << pcapPacketOfInterestFilter << "\n"
-                  << "  (pcapPacketTriggerToSaveFilter): " << pcapPacketTriggerToSaveFilter << "\n"
-                  << "  (protocolTimeoutConfigFileName): " << protocolTimeoutConfigFileName << "\n"
-                  << "  (filterAliasFile): " << filterAliasFile << "\n"
-                  << "  (inputFile): " << inputFile << "\n"
-                  << "  (interfaceName): " << interfaceName << "\n"
-                  << "  (numConsumerThreads): " << numConsumerThreads << "\n"
-                  << "  (snapshotLength): " << snapshotLength << "\n"
-                  << "  (createDetectedFile): " << (createDetectedFile ? "true" : "false") << "\n"; // <-- NEW
-        
-        std::cout << "  (tlsPorts): ";
-        for(auto port : tlsPorts) { std::cout << port << ","; }
+                  << "  (truncateTlsData): " << (truncateTlsData ? "true" : "false") << "\n"
+                  << "  (mergeOutputFiles): " << (mergeOutputFiles ? "true" : "false") << "\n"
+                  << "  (Redaction Exceptions): ";
+        for(auto code : redactAlertExceptions) { std::cout << (int)code << ","; }
         std::cout << "\n";
-        
-        std::cout << "  (streamMode): " << streamMode << "\n";
     }
 };
 
@@ -132,7 +127,7 @@ public:
      * @param options Array of argument strings.
      */
     void inputRawOptions(int argc, char* options[]);
-    
+
 private:
     /// Map of CLI strings (e.g., "--help") to handler functions.
     PluggableUnorderedMap<std::string, std::function<void(const char*)>> m_clioptions;

@@ -1,14 +1,9 @@
 /**
  * @file pcap_abbv_cli_parser.cpp
- * @brief Implementation of the command-line parser.
+ * @author James Mathewson
+ * @version 0.9.21 beta
+ * @brief Implementation of the command-line parser (Added Merge and Redaction Config).
  */
-
-/*
- * Author: James Mathewson
- * Date: 6 November 2025
- * Version: 0.7 beta 
- */
-
 
 #include "pcap_abbv_cli_parser.h"
 #include <vector>
@@ -19,28 +14,14 @@
 namespace pcapabvparser
 {
 
-/// @brief The public version string.
-std::string version = "0.9 alpha";
-
-/// @brief Global instance of the options struct.
+// Define global variables
+std::string version = "1.1.1 alpha (Merge Support)";
 struct globalOptions_t globalOptions;
 
-/**
- * @brief Prints the full help text to std::cout.
- */
 void printHelp();
 
 /**
  * @brief A static vector defining all available CLI options.
- *
- * This vector is the single source of truth for parsing CLI arguments
- * and for printing the help text.
- *
- * Each tuple contains:
- * - {string} long name (e.g., "--bufferflushsize")
- * - {string} short name (e.g., "-f")
- * - {string} help text
- * - {lambda} function to set the corresponding globalOption
  */
 const std::vector<std::tuple<std::string, std::string, std::string, std::function<void(const char*)>>> helpStrings =
 {
@@ -81,29 +62,59 @@ const std::vector<std::tuple<std::string, std::string, std::string, std::functio
         [](const char* arg) { globalOptions.filterAliasFile = arg; }
     },
     {
-        "--threads", "-j", "number of consumer threads (0 = single-threaded mode)",
-        [](const char* arg) { globalOptions.numConsumerThreads = std::stoul(arg); }
+        "--create-detected", "-d", "immediately create an empty .detected file when save criteria met",
+        [](const char* arg) { globalOptions.createDetectedFile = (strncmp(arg, "true", 4) == 0); }
     },
     {
-        "--snaplen", "-S", "snapshot length (max packet size to capture/process)",
-        [](const char* arg) { globalOptions.snapshotLength = std::stoul(arg); }
+        "--truncate-tls", "-T", "truncate TLS application data (removes app data from save files)",
+        [](const char* arg) { globalOptions.truncateTlsData = (strncmp(arg, "true", 4) == 0); }
     },
     {
-        "--tls-ports", "-P", "comma-separated list of ports to parse as TLS (e.g., 443,8443)",
+        "--merge-output", "-m", "merge all individual output pcaps into a single master file",
+        [](const char* arg) { globalOptions.mergeOutputFiles = (strncmp(arg, "true", 4) == 0); }
+    },
+    // --- NEW CLI FLAG IMPLEMENTATION ---
+    {
+        "--tls-redact-alerts", "-R", "comma-sep list of Alert DESCRIPTIONS (0-255) to EXCLUDE from truncation (e.g., 20,40)",
         [](const char* arg) {
-            globalOptions.tlsPorts.clear(); // Clear defaults
+            globalOptions.redactAlertExceptions.clear(); // Clear default 0
             std::stringstream ss(arg);
-            std::string portStr;
-            while (std::getline(ss, portStr, ',')) {
-                if (!portStr.empty()) {
-                    globalOptions.tlsPorts.insert(static_cast<uint16_t>(std::stoul(portStr)));
+            std::string codeStr;
+            while (std::getline(ss, codeStr, ',')) {
+                if (!codeStr.empty()) {
+                    try {
+                        // Ensure we parse the argument and store the list of exception codes
+                        globalOptions.redactAlertExceptions.insert(static_cast<uint8_t>(std::stoul(codeStr)));
+                    } catch (...) {}
                 }
             }
         }
     },
+    // ----------------------------------
     {
-        "--stream-mode", "-M", "Stream storage mode: 'combined' (default) or 'separate' (ingress/egress files)",
-        [](const char* arg) { globalOptions.streamMode = arg; }
+        "--dns-ports", "-D", "comma-separated list of ports to force-parse as DNS (e.g., 53,5353)",
+        [](const char* arg) {
+            globalOptions.dnsPorts.clear();
+            std::stringstream ss(arg); std::string portStr;
+            while (std::getline(ss, portStr, ',')) {
+                if (!portStr.empty()) { globalOptions.dnsPorts.insert(static_cast<uint16_t>(std::stoul(portStr))); }
+            }
+        }
+    },
+    {
+        "--tls-ports", "-P", "comma-separated list of ports to parse as TLS (e.g., 443,8443)",
+        [](const char* arg) {
+            globalOptions.tlsPorts.clear();
+            std::stringstream ss(arg);
+            std::string portStr;
+            while (std::getline(ss, portStr, ',')) {
+                if (!portStr.empty()) { globalOptions.tlsPorts.insert(static_cast<uint16_t>(std::stoul(portStr))); }
+            }
+        }
+    },
+    {
+        "--threads", "-j", "number of consumer threads (0 = single-threaded mode)",
+        [](const char* arg) { globalOptions.numConsumerThreads = std::stoul(arg); }
     },
     {
         "--file", "-r", "pcap file to read from (disables live capture)",
@@ -112,10 +123,6 @@ const std::vector<std::tuple<std::string, std::string, std::string, std::functio
     {
         "--interface", "-i", "interface to capture from (default: 'any')",
         [](const char* arg) { globalOptions.interfaceName = arg; }
-    },
-    {
-	"--create-detected", "-d", "create empty .detected file when save criteria is met",
-	[](const char* arg) { globalOptions.createDetectedFile=(strncmp(arg,"true",4)==0); }
     },
     {
         "--help", "-h", "print out help ",
@@ -134,31 +141,25 @@ cli_parser::cli_parser(int argc, char* options[]) {
 }
 
 void cli_parser::inputRawOptions(int argc, char* argv[]) {
-    // Populate the map from the static vector
     for (const auto& line : helpStrings) {
         m_clioptions[std::get<0>(line)] = std::get<3>(line);
         m_clioptions[std::get<1>(line)] = std::get<3>(line);
     }
-
-    // Parse the actual CLI arguments
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg[0] == '-') {
-            const char* value = "true"; // Default for flags
-            // Check if next argument is a value and not another option
-            if (i + 1 < argc && argv[i + 1][0] != '-') {
-                value = argv[++i];
-            }
-
+            const char* value = "true";
+            if (i + 1 < argc && argv[i + 1][0] != '-') value = argv[++i];
             auto it = m_clioptions.find(arg);
-            if (it != m_clioptions.end()) {
-                it->second(value);
-            } else {
+            if (it != m_clioptions.end()) it->second(value);
+            else {
+                // If it's an unrecognized flag, print help and exit
                 std::cerr << "Unknown parameter: " << arg << std::endl;
                 printHelp();
                 exit(1);
             }
         } else {
+            // If it's an argument not starting with '-', treat as unknown
             std::cerr << "Unexpected argument: " << arg << std::endl;
             printHelp();
             exit(1);
@@ -166,18 +167,12 @@ void cli_parser::inputRawOptions(int argc, char* argv[]) {
     }
 }
 
-// --- Implementation of help function ---
-
 void printHelp() {
-    std::cout << "Pcap Abbreviation Parser (Version: " << version << ")\n"
+    std::cout << "StreamSift Pcap Parser (Version: " << version << ")\n"
               << "Usage: pcap_parser [OPTIONS]\n\nOptions:\n";
     for (const auto& line : helpStrings) {
-        std::string long_opt = std::get<0>(line);
-        std::string short_opt = std::get<1>(line);
-        std::string help_text = std::get<2>(line);
-        
-        std::cout << "  " << long_opt << ", " << short_opt << "\n"
-                  << "      " << help_text << "\n";
+        std::cout << "  " << std::get<0>(line) << ", " << std::get<1>(line) << "\n"
+                  << "      " << std::get<2>(line) << "\n";
     }
 }
 

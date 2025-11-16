@@ -8,7 +8,7 @@ CXX = g++
 # -O3 for max speed (production)
 # -Og for optimized debugging
 # -O2 is a standard balance
-OPT_LEVEL ?= -O3
+OPT_LEVEL ?= -Og
 
 # To build for debugging, run:
 #   make clean && make OPT_LEVEL=-Og

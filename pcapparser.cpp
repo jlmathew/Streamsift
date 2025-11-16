@@ -1,14 +1,9 @@
 /**
  * @file pcapparser.cpp
+ * @author James Mathewson
+ * @version 1.1.0 beta (String Support)
  * @brief Implementation of the AST parser and nodes.
  */
-
-/*
- * Author: James Mathewson
- * Date: 6 November 2025
- * Version: 0.7 beta 
- */
-
 
 #include "pcapparser.h"
 #include <stdexcept>
@@ -16,26 +11,25 @@
 #include <utility>
 #include <thread>
 #include <iostream>
+#include <cstring>
 
 namespace pcapabvparser
 {
-// --- DELETED ---
-// thread_local std::unordered_map<...> userFunctions;
-// void registerUserFunction(...) { ... }
 
-//get function Names during Parsing
+// ... (getFnNames helper same as before) ...
 void getFnNames(const ASTNode* node, std::vector<std::string>& names) {
     if (!node) return;
     if (const auto* func = dynamic_cast<const FuncCallNode*>(node)) {
         names.push_back(func->name);
-        for (const auto& arg : func->args) {
-            getFnNames(arg.get(), names);
-        }
+        for (const auto& arg : func->args) getFnNames(arg.get(), names);
     } else if (const auto* unary = dynamic_cast<const UnaryNode*>(node)) {
         getFnNames(unary->operand.get(), names);
     } else if (const auto* binary = dynamic_cast<const BinaryNode*>(node)) {
         getFnNames(binary->left.get(), names);
         getFnNames(binary->right.get(), names);
+    } else if (const auto* strNode = dynamic_cast<const StringCompareNode*>(node)) {
+        // StringCompareNode ALSO holds a function name internally
+        names.push_back(strNode->funcName);
     }
 }
 
@@ -48,6 +42,21 @@ Token Tokenizer::next()
     if (pos >= input.size()) return {TokenType::END, ""};
 
     char ch = input[pos];
+
+    // --- NEW: Handle Quoted Strings ---
+    if (ch == '"') {
+        size_t start = ++pos;
+        std::string val;
+        while (pos < input.size() && input[pos] != '"') {
+            // Handle basic escaping if needed, for now simple strings
+            val += input[pos++];
+        }
+        if (pos >= input.size()) throw std::runtime_error("Unterminated string literal");
+        ++pos; // Skip closing quote
+        return {TokenType::STRING, val};
+    }
+    // ----------------------------------
+
     if (isdigit(ch) || (ch == '-' && pos + 1 < input.size() && isdigit(input[pos + 1])))
     {
         size_t start = pos;
@@ -55,7 +64,6 @@ Token Tokenizer::next()
         while (pos < input.size() && isdigit(input[pos])) ++pos;
         return {TokenType::NUMBER, input.substr(start, pos - start)};
     }
-
 
     if (isalpha(ch))
     {
@@ -84,53 +92,30 @@ Token Tokenizer::next()
     throw std::runtime_error("Unknown character: " + std::string(1, ch));
 }
 
-// AST Nodes
-FuncCallNode::FuncCallNode(std::string n, std::vector<ASTPtr> a) 
-    : name(std::move(n)), args(std::move(a)), m_bound_function_ptr(nullptr) {}
-
-/**
- * @brief Evaluates the function call.
- *
- * This is now extremely fast. It just calls the pre-bound pointer.
- * It no longer performs any map lookups.
- */
-int FuncCallNode::eval() const
-{
+// ... (FuncCallNode, ConstNode, UnaryNode, BinaryNode same as before) ...
+// (Omitting for brevity, they are unchanged from v0.9.17)
+FuncCallNode::FuncCallNode(std::string n, std::vector<ASTPtr> a) : name(std::move(n)), args(std::move(a)), m_bound_function_ptr(nullptr) {}
+int FuncCallNode::eval() const {
     std::vector<int> evaluatedArgs;
-    for (const auto& arg : args) {
-        evaluatedArgs.push_back(arg->eval());
-    }
-    
-    if (!m_bound_function_ptr) {
-        // This should not happen if binding was successful
-        // The logger version is bound by PacketStreamEval
-        throw std::runtime_error("Function call to '" + name + "' was not bound.");
-    }
-    
-    // Call the function via the direct pointer
+    for (const auto& arg : args) evaluatedArgs.push_back(arg->eval());
+    if (!m_bound_function_ptr) throw std::runtime_error("Function '" + name + "' unbound.");
     return (*m_bound_function_ptr)(evaluatedArgs);
+}
+std::unique_ptr<ASTNode> FuncCallNode::clone() const {
+    std::vector<ASTPtr> c_args; for(auto& a:args) c_args.push_back(a->clone());
+    return std::make_unique<FuncCallNode>(name, std::move(c_args));
 }
 
 ConstNode::ConstNode(int v) : value(v) {}
-
-int ConstNode::eval() const
-{
-    return value;
-}
+int ConstNode::eval() const { return value; }
+std::unique_ptr<ASTNode> ConstNode::clone() const { return std::make_unique<ConstNode>(value); }
 
 UnaryNode::UnaryNode(std::string o, ASTPtr e) : op(std::move(o)), operand(std::move(e)) {}
+int UnaryNode::eval() const { if (op == "!") return !operand->eval(); throw std::runtime_error("Unknown unary op"); }
+std::unique_ptr<ASTNode> UnaryNode::clone() const { return std::make_unique<UnaryNode>(op, operand->clone()); }
 
-int UnaryNode::eval() const
-{
-    if (op == "!") return !operand->eval();
-    throw std::runtime_error("Unknown unary operator: " + op);
-}
-
-BinaryNode::BinaryNode(ASTPtr l, std::string o, ASTPtr r)
-    : left(std::move(l)), op(std::move(o)), right(std::move(r)) {}
-
-int BinaryNode::eval() const
-{
+BinaryNode::BinaryNode(ASTPtr l, std::string o, ASTPtr r) : left(std::move(l)), op(std::move(o)), right(std::move(r)) {}
+int BinaryNode::eval() const {
     int l = left->eval(), r = right->eval();
     if (op == "AND") return l && r;
     if (op == "OR") return l || r;
@@ -140,58 +125,81 @@ int BinaryNode::eval() const
     if (op == "<=") return l <= r;
     if (op == "==") return l == r;
     if (op == "!=") return l != r;
-    throw std::runtime_error("Unknown binary operator: " + op);
+    throw std::runtime_error("Unknown binary op");
+}
+std::unique_ptr<ASTNode> BinaryNode::clone() const { return std::make_unique<BinaryNode>(left->clone(), op, right->clone()); }
+
+
+// --- NEW: StringCompareNode Implementation ---
+
+StringCompareNode::StringCompareNode(std::string name, std::vector<ASTPtr> a, std::string o, std::string t)
+    : funcName(std::move(name)), args(std::move(a)), op(std::move(o)), target(std::move(t)), m_bound_string_func(nullptr) {}
+
+int StringCompareNode::eval() const {
+    if (!m_bound_string_func) {
+        // If unbound, default to false (safe failure)
+        // Or throw if we want to be strict. Let's be safe.
+        return 0;
+    }
+
+    // Evaluate integer arguments (e.g., index)
+    std::vector<int> evalArgs;
+    for(const auto& a : args) evalArgs.push_back(a->eval());
+
+    // Get the zero-copy view from the lambda
+    std::string_view actual = (*m_bound_string_func)(evalArgs);
+
+    // Perform comparison
+    if (op == "==") return actual == target;
+    if (op == "!=") return actual != target;
+
+    // Future: 'contains', 'startswith', etc.
+
+    return 0;
 }
 
-// Parser
-FnParser::FnParser(const std::string& input) : tokenizer(input)
-{
-    advance();
+std::unique_ptr<ASTNode> StringCompareNode::clone() const {
+    std::vector<ASTPtr> c_args;
+    for(const auto& a : args) c_args.push_back(a->clone());
+    return std::make_unique<StringCompareNode>(funcName, std::move(c_args), op, target);
 }
 
-void FnParser::advance()
-{
-    current = tokenizer.next();
-}
+// --- Parser Updates ---
 
-ASTPtr FnParser::parsePrimary()
-{
-    if (current.type == TokenType::NUMBER)
-    {
+FnParser::FnParser(const std::string& input) : tokenizer(input) { advance(); }
+void FnParser::advance() { current = tokenizer.next(); }
+
+ASTPtr FnParser::parsePrimary() {
+    if (current.type == TokenType::NUMBER) {
         int val = std::stoi(current.value);
         advance();
         return std::make_unique<ConstNode>(val);
     }
-    if (current.type == TokenType::IDENT)
-    {
+    if (current.type == TokenType::IDENT) {
         std::string name = current.value;
         advance();
-        if (current.type == TokenType::LPAREN)
-        {
+        if (current.type == TokenType::LPAREN) {
             advance();
             std::vector<ASTPtr> args;
-            if (current.type != TokenType::RPAREN)
-            {
-                do
-                {
+            if (current.type != TokenType::RPAREN) {
+                do {
                     args.push_back(parseExpression());
                     if (current.type == TokenType::COMMA) advance();
-                }
-                while (current.type != TokenType::RPAREN);
+                } while (current.type != TokenType::RPAREN);
             }
             advance();
+            // We return a FuncCallNode initially. The PARENT (parseComparison)
+            // will convert it to a StringCompareNode if it sees a string literal next.
             return std::make_unique<FuncCallNode>(name, std::move(args));
         }
-        throw std::runtime_error("Unexpected identifier without function call");
+        throw std::runtime_error("Expected function call");
     }
-    if (current.type == TokenType::OP && current.value == "!")
-    {
+    if (current.type == TokenType::OP && current.value == "!") {
         std::string op = current.value;
         advance();
         return std::make_unique<UnaryNode>(op, parsePrimary());
     }
-    if (current.type == TokenType::LPAREN)
-    {
+    if (current.type == TokenType::LPAREN) {
         advance();
         ASTPtr expr = parseExpression();
         if (current.type != TokenType::RPAREN) throw std::runtime_error("Expected ')'");
@@ -201,9 +209,10 @@ ASTPtr FnParser::parsePrimary()
     throw std::runtime_error("Unexpected token: " + current.value);
 }
 
-ASTPtr FnParser::parseComparison()
-{
+ASTPtr FnParser::parseComparison() {
     ASTPtr left = parsePrimary();
+
+    // Check if we have a comparison operator
     while (current.type == TokenType::OP &&
            (current.value == "==" || current.value == "!=" ||
             current.value == "<" || current.value == ">" ||
@@ -211,17 +220,43 @@ ASTPtr FnParser::parseComparison()
     {
         std::string op = current.value;
         advance();
-        ASTPtr right = parsePrimary();
-        left = std::make_unique<BinaryNode>(std::move(left), op, std::move(right));
+
+        // --- NEW: Check for String Literal on RHS ---
+        if (current.type == TokenType::STRING) {
+            std::string targetStr = current.value;
+            advance();
+
+            // We must convert 'left' (which is currently a FuncCallNode)
+            // into a StringCompareNode.
+            auto* funcNode = dynamic_cast<FuncCallNode*>(left.get());
+            if (!funcNode) {
+                throw std::runtime_error("String comparison requires a function on the left side.");
+            }
+
+            // Create the specialized string node
+            // We steal the name and args from the FuncCallNode
+            // Note: This assumes 'left' was just created and we own it.
+            auto strNode = std::make_unique<StringCompareNode>(
+                funcNode->name,
+                std::move(funcNode->args), // stealing ownership of args
+                op,
+                targetStr
+            );
+
+            left = std::move(strNode);
+        }
+        else {
+            // Standard integer comparison
+            ASTPtr right = parsePrimary();
+            left = std::make_unique<BinaryNode>(std::move(left), op, std::move(right));
+        }
     }
     return left;
 }
 
-ASTPtr FnParser::parseAnd()
-{
+ASTPtr FnParser::parseAnd() {
     ASTPtr left = parseComparison();
-    while (current.type == TokenType::OP && current.value == "AND")
-    {
+    while (current.type == TokenType::OP && current.value == "AND") {
         std::string op = current.value;
         advance();
         ASTPtr right = parseComparison();
@@ -230,11 +265,9 @@ ASTPtr FnParser::parseAnd()
     return left;
 }
 
-ASTPtr FnParser::parseOr()
-{
+ASTPtr FnParser::parseOr() {
     ASTPtr left = parseAnd();
-    while (current.type == TokenType::OP && current.value == "OR")
-    {
+    while (current.type == TokenType::OP && current.value == "OR") {
         std::string op = current.value;
         advance();
         ASTPtr right = parseAnd();
@@ -243,14 +276,8 @@ ASTPtr FnParser::parseOr()
     return left;
 }
 
-ASTPtr FnParser::parseExpression()
-{
-    return parseOr();
-}
-
-ASTPtr FnParser::parse()
-{
-    return parseOr();
-}
+ASTPtr FnParser::parseExpression() { return parseOr(); }
+ASTPtr FnParser::parse() { return parseOr(); }
 
 } // namespace pcapabvparser
+
