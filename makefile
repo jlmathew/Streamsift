@@ -24,6 +24,8 @@ CXXFLAGS = -std=c++17 $(OPT_LEVEL) -g -Wall -pthread
 
 # Add -DBENCHMARK_THREAD to CXXFLAGS to enable benchmarking
 # CXXFLAGS += -DBENCHMARK_THREAD
+# CXXFLAGS += -D_DEBUGCHECKSUM_ -D_DEBUGBLOCKING_
+#CXXFLAGS +=  -D_DEBUGBLOCKING_
 
 # Linker Flags
 # -lpcap is required for the pcap library

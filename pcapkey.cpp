@@ -1,8 +1,8 @@
 /**
  * @file pcapkey.cpp
  * @author James Mathewson
- * @version 1.0.1 alpha
- * @brief Implementation of the packet parser and key generator.
+ * @version 1.1.0 (Tunneling Support)
+ * @brief Implementation of the packet parser. Key logic updated for tunneling.
  */
 
 #include "pcapkey.h"
@@ -45,12 +45,10 @@
 #define DLT_IPV6 229
 #endif
 
-// --- FIX: Added missing GRE header definition ---
 struct gre_hdr {
     uint16_t flags_and_version;
     uint16_t protocol_type;
 };
-// ------------------------------------------------
 
 struct sll_header {
     uint16_t sll_pkttype;
@@ -79,7 +77,9 @@ static void parse_recursive(
     ProtocolInfo info;
     info.type = current_proto_type;
     info.data_ptr = packet + offset;
-   
+    info.header_length = 0;
+    info.payload_length = 0;
+
     uint32_t next_proto_type = 0;
 
     switch (current_proto_type) {
@@ -87,26 +87,32 @@ static void parse_recursive(
             if (offset + sizeof(ip) > caplen) return;
             const ip* ipv4 = reinterpret_cast<const ip*>(packet + offset);
             if (ipv4->ip_v != 4) return;
+
             info.header_length = ipv4->ip_hl * 4;
             if (offset + info.header_length > caplen) return;
             info.payload_length = ntohs(ipv4->ip_len) - info.header_length;
+
             offset += info.header_length;
-            if (!key_locked && key.empty()) {
+
+            // Always add IP to key (Supports Tunnels)
+            key.push_back(IPPROTO_IPIP);
+
+            if (ntohl(ipv4->ip_src.s_addr) > ntohl(ipv4->ip_dst.s_addr)) {
+                key.insert(key.end(), (uint8_t*)&ipv4->ip_src, (uint8_t*)&ipv4->ip_src + 4);
+                key.insert(key.end(), (uint8_t*)&ipv4->ip_dst, (uint8_t*)&ipv4->ip_dst + 4);
+                if (offsets.l3_offset == 0) offsets.originalAddrPortOrdering = true;
+            } else {
+                key.insert(key.end(), (uint8_t*)&ipv4->ip_dst, (uint8_t*)&ipv4->ip_dst + 4);
+                key.insert(key.end(), (uint8_t*)&ipv4->ip_src, (uint8_t*)&ipv4->ip_src + 4);
+                if (offsets.l3_offset == 0) offsets.originalAddrPortOrdering = false;
+            }
+
+            if (offsets.l3_offset == 0) {
                 offsets.l3_offset = (size_t)(info.data_ptr - packet);
                 offsets.ip_protocol = ipv4->ip_p;
                 offsets.ethertype = ETHERTYPE_IP;
-                key.push_back((uint8_t)((ETHERTYPE_IP >> 8) & 0xFF));
-                key.push_back((uint8_t)(ETHERTYPE_IP & 0xFF));
-                if (ntohl(ipv4->ip_src.s_addr) > ntohl(ipv4->ip_dst.s_addr)) {
-                    key.insert(key.end(), (uint8_t*)&ipv4->ip_src, (uint8_t*)&ipv4->ip_src + 4);
-                    key.insert(key.end(), (uint8_t*)&ipv4->ip_dst, (uint8_t*)&ipv4->ip_dst + 4);
-                    offsets.originalAddrPortOrdering = true;
-                } else {
-                    key.insert(key.end(), (uint8_t*)&ipv4->ip_dst, (uint8_t*)&ipv4->ip_dst + 4);
-                    key.insert(key.end(), (uint8_t*)&ipv4->ip_src, (uint8_t*)&ipv4->ip_src + 4);
-                    offsets.originalAddrPortOrdering = false;
-                }
             }
+
             next_proto_type = ipv4->ip_p;
             break;
         }
@@ -114,24 +120,27 @@ static void parse_recursive(
             if (offset + sizeof(ip6_hdr) > caplen) return;
             const ip6_hdr* ipv6 = reinterpret_cast<const ip6_hdr*>(packet + offset);
             if ((ipv6->ip6_vfc & 0xF0) >> 4 != 6) return;
+
             info.header_length = sizeof(ip6_hdr);
             info.payload_length = ntohs(ipv6->ip6_plen);
             offset += info.header_length;
-            if (!key_locked && key.empty()) {
+
+            key.push_back(IPPROTO_IPV6);
+
+            if (memcmp(&ipv6->ip6_src, &ipv6->ip6_dst, 16) > 0) {
+                key.insert(key.end(), (uint8_t*)&ipv6->ip6_src, (uint8_t*)&ipv6->ip6_src + 16);
+                key.insert(key.end(), (uint8_t*)&ipv6->ip6_dst, (uint8_t*)&ipv6->ip6_dst + 16);
+                if (offsets.l3_offset == 0) offsets.originalAddrPortOrdering = true;
+            } else {
+                key.insert(key.end(), (uint8_t*)&ipv6->ip6_dst, (uint8_t*)&ipv6->ip6_dst + 16);
+                key.insert(key.end(), (uint8_t*)&ipv6->ip6_src, (uint8_t*)&ipv6->ip6_src + 16);
+                if (offsets.l3_offset == 0) offsets.originalAddrPortOrdering = false;
+            }
+
+             if (offsets.l3_offset == 0) {
                 offsets.l3_offset = (size_t)(info.data_ptr - packet);
                 offsets.ip_protocol = ipv6->ip6_nxt;
                 offsets.ethertype = ETHERTYPE_IPV6;
-                key.push_back((uint8_t)((ETHERTYPE_IPV6 >> 8) & 0xFF));
-                key.push_back((uint8_t)(ETHERTYPE_IPV6 & 0xFF));
-                if (memcmp(&ipv6->ip6_src, &ipv6->ip6_dst, 16) > 0) {
-                    key.insert(key.end(), (uint8_t*)&ipv6->ip6_src, (uint8_t*)&ipv6->ip6_src + 16);
-                    key.insert(key.end(), (uint8_t*)&ipv6->ip6_dst, (uint8_t*)&ipv6->ip6_dst + 16);
-                    offsets.originalAddrPortOrdering = true;
-                } else {
-                    key.insert(key.end(), (uint8_t*)&ipv6->ip6_dst, (uint8_t*)&ipv6->ip6_dst + 16);
-                    key.insert(key.end(), (uint8_t*)&ipv6->ip6_src, (uint8_t*)&ipv6->ip6_src + 16);
-                    offsets.originalAddrPortOrdering = false;
-                }
             }
             next_proto_type = ipv6->ip6_nxt;
             break;
@@ -149,30 +158,30 @@ static void parse_recursive(
             if (offset + info.header_length > caplen) return;
             offset += info.header_length;
             info.payload_length = caplen - offset;
-            if (!key_locked && !key.empty()) {
+
+            if (!key_locked) {
                 offsets.l4_offset = (size_t)(info.data_ptr - packet);
                 offsets.payload_offset = offset;
                 offsets.src_port = ntohs(tcp->th_sport);
                 offsets.dst_port = ntohs(tcp->th_dport);
+
                 key.push_back(IPPROTO_TCP);
                 uint16_t p1 = offsets.src_port, p2 = offsets.dst_port;
+
                 if (!offsets.originalAddrPortOrdering) std::swap(p1, p2);
+
                 key.push_back((uint8_t)((p1 >> 8) & 0xFF)); key.push_back((uint8_t)(p1 & 0xFF));
                 key.push_back((uint8_t)((p2 >> 8) & 0xFF)); key.push_back((uint8_t)(p2 & 0xFF));
                 key_locked = true;
             }
+
             if (info.payload_length > 0) {
                 uint16_t sp = ntohs(tcp->th_sport);
                 uint16_t dp = ntohs(tcp->th_dport);
-                if (tls_ports.count(sp) || tls_ports.count(dp)) {
-                    next_proto_type = PROTO_TLS;
-                } else if (dns_ports.count(sp) || dns_ports.count(dp)) {
-                    next_proto_type = PROTO_DNS;
-                } else if (sp == 445 || dp == 445) {
-                    next_proto_type = PROTO_SMB;
-                } else if (sp == 2049 || dp == 2049) {
-                    next_proto_type = PROTO_NFS;
-                }
+                if (tls_ports.count(sp) || tls_ports.count(dp)) next_proto_type = PROTO_TLS;
+                else if (dns_ports.count(sp) || dns_ports.count(dp)) next_proto_type = PROTO_DNS;
+                else if (sp == 445 || dp == 445) next_proto_type = PROTO_SMB;
+                else if (sp == 2049 || dp == 2049) next_proto_type = PROTO_NFS;
             }
             break;
         }
@@ -186,28 +195,28 @@ static void parse_recursive(
             info.payload_length = ntohs(udp->uh_len) - info.header_length;
             #endif
             offset += info.header_length;
-            if (!key_locked && !key.empty()) {
+
+            if (!key_locked) {
                 offsets.l4_offset = (size_t)(info.data_ptr - packet);
                 offsets.payload_offset = offset;
                 offsets.src_port = ntohs(udp->uh_sport);
                 offsets.dst_port = ntohs(udp->uh_dport);
+
                 key.push_back(IPPROTO_UDP);
                 uint16_t p1 = offsets.src_port, p2 = offsets.dst_port;
                 if (!offsets.originalAddrPortOrdering) std::swap(p1, p2);
+
                 key.push_back((uint8_t)((p1 >> 8) & 0xFF)); key.push_back((uint8_t)(p1 & 0xFF));
                 key.push_back((uint8_t)((p2 >> 8) & 0xFF)); key.push_back((uint8_t)(p2 & 0xFF));
                 key_locked = true;
             }
-            if (info.payload_length > 0) {
+
+             if (info.payload_length > 0) {
                 uint16_t sp = ntohs(udp->uh_sport);
                 uint16_t dp = ntohs(udp->uh_dport);
-                if (tls_ports.count(sp) || tls_ports.count(dp)) {
-                     next_proto_type = PROTO_TLS;
-                } else if (dns_ports.count(sp) || dns_ports.count(dp)) {
-                     next_proto_type = PROTO_DNS;
-                } else if (sp == 2049 || dp == 2049) {
-                     next_proto_type = PROTO_NFS;
-                }
+                if (tls_ports.count(sp) || tls_ports.count(dp)) next_proto_type = PROTO_TLS;
+                else if (dns_ports.count(sp) || dns_ports.count(dp)) next_proto_type = PROTO_DNS;
+                else if (sp == 2049 || dp == 2049) next_proto_type = PROTO_NFS;
             }
             break;
         }
@@ -215,7 +224,7 @@ static void parse_recursive(
         case IPPROTO_ICMPV6: {
              info.header_length = (current_proto_type == IPPROTO_ICMP) ? 8 : 4;
              if (offset + info.header_length > caplen) return;
-             if (!key_locked && !key.empty()) {
+             if (!key_locked) {
                  offsets.l4_offset = (size_t)(info.data_ptr - packet);
                  key.push_back((uint8_t)current_proto_type);
                  if (current_proto_type == IPPROTO_ICMP) {
@@ -241,10 +250,8 @@ static void parse_recursive(
             if (flags & 0x2000) info.header_length += 4;
             if (flags & 0x1000) info.header_length += 4;
             if (offset + info.header_length > caplen) return;
-            if (!key_locked && !key.empty()) {
-                key.push_back(IPPROTO_GRE);
-                key_locked = true;
-            }
+
+            // Do NOT add GRE to key, we want inner IP to be the differentiator
             offset += info.header_length;
             next_proto_type = ntohs(gre->protocol_type);
             break;
@@ -252,19 +259,11 @@ static void parse_recursive(
         case IPPROTO_IPIP:
         case IPPROTO_IPV6:
             info.header_length = 0;
-             if (!key_locked && !key.empty()) {
-                key.push_back((uint8_t)current_proto_type);
-                key_locked = true;
-            }
             next_proto_type = (current_proto_type == IPPROTO_IPIP) ? ETHERTYPE_IP : ETHERTYPE_IPV6;
             break;
         case IPPROTO_ESP:
         case IPPROTO_AH:
             info.header_length = 8;
-             if (!key_locked && !key.empty()) {
-                key.push_back((uint8_t)current_proto_type);
-                key_locked = true;
-            }
             offset = caplen;
             break;
         case PROTO_DNS:
@@ -273,13 +272,15 @@ static void parse_recursive(
         case PROTO_NFS:
             info.header_length = 0;
             info.payload_length = caplen - offset;
-            offset = caplen;
+            offset = caplen; // Consume rest
             break;
         default:
             offset = caplen;
             break;
     }
+
     stack.push_back(info);
+
     if (next_proto_type != 0 && offset < caplen) {
         parse_recursive(next_proto_type, packet, offset, caplen,
                         key, key_locked, offsets, stack, tls_ports, dns_ports);
@@ -301,7 +302,7 @@ parse_packet(
     auto stack = std::make_unique<ProtocolStack_t>();
     size_t offset = 0;
     bool key_locked = false;
-    key->reserve(40);
+    key->reserve(64);
     uint32_t next_proto_type = 0;
 
     switch (l2_proto) {
@@ -358,7 +359,9 @@ parse_packet(
         parse_recursive(next_proto_type, packet, offset, caplen,
                         *key, key_locked, *offsets, *stack, tls_ports, dns_ports);
     }
-    if (key->empty()) key->clear();
+
+    if (key->empty()) key->push_back(0xFF);
+
     return std::make_tuple(std::move(key), std::move(offsets), std::move(stack));
 }
 
@@ -369,7 +372,6 @@ std::string print_simplekey(const std::vector<uint8_t>& key) {
     return oss.str();
 }
 
-void print_key_debug(const std::vector<uint8_t>& key) {
-}
+void print_key_debug(const std::vector<uint8_t>& key) {}
 
 } //end namespace

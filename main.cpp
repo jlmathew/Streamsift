@@ -1,11 +1,8 @@
 /**
  * @file main.cpp
  * @author James Mathewson
- * @version 0.9.15 beta
- * @brief Main entry point with enhanced queue and stream statistics.
- *
- * NOTE: The consumer.cpp file has been updated to handle the 'current_active_streams'
- * decrement when streams expire in the multi-threaded consumer loop.
+ * @version 1.5.0 (Blocking Logic Commented Out)
+ * @brief Main entry point. Default is Non-Blocking/Drop. Blocking logic preserved in comments.
  */
 
 #include <iostream>
@@ -15,6 +12,7 @@
 #include <vector>
 #include <thread>
 #include <algorithm>
+#include <cstring>
 
 #include "pcapparser.h"
 #include "pcap_abbv_cli_parser.h"
@@ -27,8 +25,6 @@
 #include "Benchmark.h"
 #include "ConfigParser.h"
 
-// --- Debug Macro ---
-// #define DEBUG_MAIN
 #ifdef DEBUG_MAIN
     #define LOG_DEBUG(msg) Logger::log("[DEBUG][MAIN] " + std::string(msg))
 #else
@@ -37,7 +33,6 @@
 
 using namespace pcapabvparser;
 
-// --- Global Variable Definitions (Initialized in main) ---
 std::atomic<bool> g_done{false};
 std::atomic<uint64_t> g_total_packets_read{0};
 std::atomic<uint64_t> g_total_packets_dropped{0};
@@ -46,7 +41,6 @@ std::atomic<uint64_t> g_total_streams_saved{0};
 std::atomic<int64_t>  g_current_active_streams{0};
 std::atomic<uint64_t> g_max_active_streams{0};
 
-// Global pointer to buffers for final stats reporting in multi-threaded mode
 static std::vector<std::shared_ptr<IQueue<std::unique_ptr<pktBufferData_t>>>>* g_active_buffers = nullptr;
 
 void signalHandler(int signum) {
@@ -65,12 +59,6 @@ pcap_t* openPcapSource(char* errbuf) {
         Logger::log("Opening pcap file: " + globalOptions.inputFile);
         pcapInputStream = pcap_open_offline(globalOptions.inputFile.c_str(), errbuf);
     }
-    if (pcapInputStream == nullptr) return nullptr;
-    if (globalOptions.inputFile.empty()) {
-         if (pcap_setnonblock(pcapInputStream, 1, errbuf) == -1) {
-             Logger::log("Warning: Could not set non-blocking mode.");
-         }
-    }
     return pcapInputStream;
 }
 
@@ -79,7 +67,6 @@ std::string resolveAlias(const std::string& filterOrAlias, const AliasMap& alias
     if (filterOrAlias.find_first_of("\"'() ") != std::string::npos) return filterOrAlias;
     auto it = aliasMap.find(filterOrAlias);
     if (it != aliasMap.end()) return it->second;
-    Logger::log("Warning: Filter '" + filterOrAlias + "' is not an alias and not quoted. Using as-is.");
     return filterOrAlias;
 }
 
@@ -115,6 +102,8 @@ void runMultiThreaded(pcap_t* pcapInputStream, int layer2Proto,
     const u_char* packetData;
     int resultTimeout = 0;
 
+    hashFn hasher;
+
     while (!g_done.load(std::memory_order_acquire)) {
         resultTimeout = pcap_next_ex(pcapInputStream, &pktHeader, &packetData);
         if (g_done.load(std::memory_order_acquire)) break;
@@ -129,27 +118,42 @@ void runMultiThreaded(pcap_t* pcapInputStream, int layer2Proto,
         g_total_packets_read.fetch_add(1, std::memory_order_relaxed);
 
         size_t bytesToParse = std::min((size_t)pktHeader->caplen, (size_t)globalOptions.snapshotLength);
-        auto [key, offsets, stack] = parse_packet(layer2Proto, packetData, bytesToParse, globalOptions.tlsPorts, globalOptions.dnsPorts);
-        if (key->size() == 0) { continue; }
 
-        auto headerCopy = std::make_unique<pcap_pkthdr>(*pktHeader);
-        headerCopy->caplen = bytesToParse;
+        // Copy-First Architecture (Critical for Thread Safety)
         auto packetCopy = std::unique_ptr<uint8_t[]>(new uint8_t[bytesToParse]);
         std::memcpy(packetCopy.get(), packetData, bytesToParse);
 
-        VectorHash hasher;
+        auto [key, offsets, stack] = parse_packet(layer2Proto, packetCopy.get(), bytesToParse, globalOptions.tlsPorts, globalOptions.dnsPorts);
+
+        if (key->size() == 0) {
+            continue;
+        }
+
+        auto headerCopy = std::make_unique<pcap_pkthdr>(*pktHeader);
+        headerCopy->caplen = bytesToParse;
+
         size_t target = hasher(*key) % numConsumers;
 
         auto queueData = std::make_unique<pktBufferData_t>(
             std::move(headerCopy), std::move(packetCopy),
             std::move(offsets), std::move(key), std::move(stack), target);
 
+        // ====================================================================
+        // OPTIONAL BLOCKING PUSH (Commented Out)
+        // Use this if you want to ensure ZERO drops for file processing,
+        // at the cost of slowing down the main thread to the consumer speed.
+        /*
+        while (!nb_buffers[target]->push(std::move(queueData))) {
+             if (g_done.load(std::memory_order_acquire)) break;
+             std::this_thread::yield();
+             // Note: unique_ptr ownership is retained if push returns false
+        }
+        */
+        // ====================================================================
+
+        // DEFAULT: Non-blocking Push (Drop if full)
         if (!nb_buffers[target]->push(std::move(queueData))) {
             g_total_packets_dropped.fetch_add(1, std::memory_order_relaxed);
-            static int drop_counter = 0;
-            if (++drop_counter % 10000 == 0) { //10k or standard queue size (65k)
-                 Logger::log("Packet DROP! Consumer queue " + std::to_string(target) + " full. (x10000)");
-            }
         }
     }
 
@@ -176,11 +180,13 @@ void runSingleThreaded(pcap_t* pcapInputStream, int layer2Proto,
         save_ast = saveParser.parse();
         if (!save_ast) { Logger::log("ERROR: Failed to parse SAVE filter string."); return; }
     }
-    using PacketStreamMap = PluggableUnorderedMap<std::vector<uint8_t>, std::shared_ptr<PacketStreamEval>, VectorHash>;
-    PacketStreamMap packetStreamMap;
+
+    using PacketStreamMap = PluggableUnorderedMap<std::vector<uint8_t>, std::shared_ptr<PacketStreamEval>, hashFn>;
     using TimePoint = std::chrono::steady_clock::time_point;
     using ExpiryMap = std::map<TimePoint, std::vector<uint8_t>>;
-    using StreamExpiryLookupMap = PluggableUnorderedMap<std::vector<uint8_t>, TimePoint, VectorHash>;
+    using StreamExpiryLookupMap = PluggableUnorderedMap<std::vector<uint8_t>, TimePoint, hashFn>;
+
+    PacketStreamMap packetStreamMap;
     ExpiryMap expiryMap;
     StreamExpiryLookupMap streamExpiryLookupMap;
     TimePoint lastExpiryCheckTime = std::chrono::steady_clock::now();
@@ -200,10 +206,9 @@ void runSingleThreaded(pcap_t* pcapInputStream, int layer2Proto,
                     if (it->first > now) break;
                     auto stream_it = packetStreamMap.find(it->second);
                     if (stream_it != packetStreamMap.end()) {
-                        LOG_DEBUG("Stream expired: " + print_simplekey(it->second));
                         stream_it->second->cleanupOnExpiry();
                         packetStreamMap.erase(stream_it);
-                        g_current_active_streams.fetch_sub(1, std::memory_order_relaxed); // <-- FIX: Decrement active count
+                        g_current_active_streams.fetch_sub(1, std::memory_order_relaxed);
                     }
                     streamExpiryLookupMap.erase(it->second);
                     it = expiryMap.erase(it);
@@ -219,15 +224,20 @@ void runSingleThreaded(pcap_t* pcapInputStream, int layer2Proto,
              break;
         }
         g_total_packets_read.fetch_add(1, std::memory_order_relaxed);
-        ScopedTimer timer;
+
         size_t bytesToParse = std::min((size_t)pktHeader->caplen, (size_t)globalOptions.snapshotLength);
-        auto [key_ptr, offsets, stack] = parse_packet(layer2Proto, packetData, bytesToParse, globalOptions.tlsPorts, globalOptions.dnsPorts);
+
+        auto packetCopy = std::unique_ptr<uint8_t[]>(new uint8_t[bytesToParse]);
+        std::memcpy(packetCopy.get(), packetData, bytesToParse);
+
+        auto [key_ptr, offsets, stack] = parse_packet(layer2Proto, packetCopy.get(), bytesToParse, globalOptions.tlsPorts, globalOptions.dnsPorts);
         if (key_ptr->size() == 0) continue;
         const auto& key = *key_ptr;
+
         std::shared_ptr<PacketStreamEval> packetInfo;
         auto find_iter = packetStreamMap.find(key);
         if (find_iter == packetStreamMap.end()) {
-            packetInfo = std::make_shared<PacketStreamEval>();
+            packetInfo = std::make_shared<PacketStreamEval>(0);
             packetInfo->setId(print_simplekey(key));
             packetInfo->registerAndBindAST(tag_ast.get(), (saveFilter == tagFilter ? tag_ast.get() : save_ast.get()), timeoutMap);
             packetStreamMap[key] = packetInfo;
@@ -244,18 +254,15 @@ void runSingleThreaded(pcap_t* pcapInputStream, int layer2Proto,
         TimePoint newExpiryTime = now + timeout;
         expiryMap[newExpiryTime] = key;
         streamExpiryLookupMap[key] = newExpiryTime;
+
         auto headerCopy = std::make_unique<pcap_pkthdr>(*pktHeader);
         headerCopy->caplen = bytesToParse;
-        auto packetCopy = std::unique_ptr<uint8_t[]>(new uint8_t[bytesToParse]);
-        std::memcpy(packetCopy.get(), packetData, bytesToParse);
+
         packetInfo->evaluatePacket(headerCopy.get(), packetCopy.get(), offsets.get(), stack.get());
         packetInfo->transferPacket(std::move(headerCopy), std::move(packetCopy), offsets->originalAddrPortOrdering);
     }
     Logger::log("Main loop finished. Cleaning up " + std::to_string(packetStreamMap.size()) + " streams...");
     for (auto& pair : packetStreamMap) pair.second->cleanupOnExpiry();
-    packetStreamMap.clear();
-    expiryMap.clear();
-    streamExpiryLookupMap.clear();
     Logger::log(GetBenchmarkResults(0));
 }
 
@@ -290,8 +297,6 @@ int main(int argc, char* argv[]) {
         }
     } catch (const std::exception& e) {
         Logger::log("FATAL ERROR in main thread: " + std::string(e.what()));
-    } catch (...) {
-        Logger::log("FATAL ERROR: Unknown exception in main thread.");
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();

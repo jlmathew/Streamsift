@@ -1,8 +1,6 @@
 /**
  * @file pcapkey.h
- * @author James Mathewson
- * @version 1.0.0 alpha
- * @brief Defines packet parsing functions, protocol stack structures, and 5-tuple key generation.
+ * @brief Defines packet parsing and Selectable Hashing Strategy.
  */
 
 #ifndef __PCAPKEY_H__
@@ -26,21 +24,14 @@
 #include <unordered_map>
 #include <functional>
 #include <tuple>
+#include <string_view>
 
-// --- L7 Protocol Type Definitions ---
 #define PROTO_DNS 0x10001
 #define PROTO_TLS 0x10002
-#define PROTO_SMB 0x10003 // <-- NEW
-#define PROTO_NFS 0x10004 // <-- NEW
+#define PROTO_SMB 0x10003
+#define PROTO_NFS 0x10004
 
 namespace pcapabvparser {
-
-struct VectorHash {
-    std::size_t operator()(const std::vector<uint8_t>& vec) const {
-        std::string_view view(reinterpret_cast<const char*>(vec.data()), vec.size());
-        return std::hash<std::string_view>{}(view);
-    }
-};
 
 struct PacketOffsets_t {
     size_t l2_offset = 0;
@@ -65,7 +56,53 @@ struct ProtocolInfo {
 
 using ProtocolStack_t = std::vector<ProtocolInfo>;
 
-// --- UPDATED SIGNATURE ---
+// =============================================================
+// HASHING STRATEGY SELECTION
+// =============================================================
+
+// 1. Standard (Fastest, non-deterministic)
+struct VectorHash {
+    std::size_t operator()(const std::vector<uint8_t>& vec) const {
+        std::string_view view(reinterpret_cast<const char*>(vec.data()), vec.size());
+        return std::hash<std::string_view>{}(view);
+    }
+};
+
+// 2. Bernstein (djb2) - Fast & Simple
+struct BernsteinHash {
+    std::size_t operator()(const std::vector<uint8_t>& vec) const {
+        size_t hash = 5381;
+        for (uint8_t byte : vec) {
+            hash = ((hash << 5) + hash) + byte; /* hash * 33 + c */
+        }
+        return hash;
+    }
+};
+
+// 3. FNV-1a - Deterministic & Robust (Default)
+struct DeterministicHash {
+    std::size_t operator()(const std::vector<uint8_t>& vec) const {
+        size_t hash = 14695981039346656037ULL;
+        for (uint8_t byte : vec) {
+            hash ^= byte;
+            hash *= 1099511628211ULL;
+        }
+        return hash;
+    }
+};
+
+// Compile-time Selection Logic
+#if defined(USE_STD_HASH)
+    using hashFn = VectorHash;
+#elif defined(USE_BERNSTEIN_HASH)
+    using hashFn = BernsteinHash;
+#else
+    // Default: Ensure consistent multi-threaded behavior
+    using hashFn = DeterministicHash;
+#endif
+
+// =============================================================
+
 std::tuple<std::unique_ptr<std::vector<uint8_t>>,
            std::unique_ptr<PacketOffsets_t>,
            std::unique_ptr<ProtocolStack_t>>
@@ -74,11 +111,11 @@ parse_packet(
     const uint8_t* packet,
     size_t caplen,
     const std::set<uint16_t>& tls_ports,
-    const std::set<uint16_t>& dns_ports // <-- NEW ARGUMENT
+    const std::set<uint16_t>& dns_ports
 );
 
 std::string print_simplekey(const std::vector<uint8_t>& key);
 void print_key_debug(const std::vector<uint8_t>& key);
 
-} //end namespace
+}
 #endif // __PCAPKEY_H__
