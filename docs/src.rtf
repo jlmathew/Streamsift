@@ -1,0 +1,104 @@
+StreamSift: Software Specification Document
+
+Version: 1.0
+
+Date: November 9, 2025
+
+Author: James Mathewson
+1. Introduction
+1.1 Purpose
+
+StreamSift is a high-performance, multi-threaded network packet analysis engine designed to solve the "needle in a haystack" problem in network troubleshooting. It provides a mechanism to monitor high-speed links in real-time, buffer packet streams in memory, and only commit data to disk when complex, stateful criteria are met.
+1.2 Scope
+
+The software is a command-line utility for Linux (primary), with planned support for FreeBSD. It operates in user space, utilizing libpcap for packet capture. It is not a kernel module or a replacement for full-capture tools like tcpdump when unconditional capture is required.
+2. Functional Requirements
+2.1 Packet Capture
+
+    FR1.1: Must support live capture from a specified network interface (e.g., eth0, any).
+
+    FR1.2: Must support offline analysis by reading from standard .pcap files.
+
+    FR1.3: Must support a configurable snapshot length (snaplen) to limit memory usage per packet.
+
+2.2 Stream Management
+
+    FR2.1: Must identify unique packet streams based on a normalized 5-tuple (SrcIP, DstIP, L4Proto, SrcPort, DstPort), ensuring bidirectional traffic maps to the same stream.
+
+    FR2.2: Must support decapsulation of common tunnel protocols (GRE, IP-in-IP) to identify inner streams.
+
+    FR2.3: Must maintain a configurable rolling buffer of packets for each active stream ("X packets before").
+
+    FR2.4: Must support a configurable timeout for inactive streams to release memory.
+
+2.3 Filtering & Analysis
+
+    FR3.1: Must provide a "Tag" filter to identify streams of potential interest and trigger buffering.
+
+    FR3.2: Must provide a "Save" filter to confirm if a tagged stream should be written to disk.
+
+    FR3.3: Must support a custom filter language allowing complex boolean logic (AND, OR, !) and comparison operators (>, <, ==, !=).
+
+    FR3.4: Must support both stateless (per-packet, e.g., TCP.Flags) and stateful (per-stream, e.g., TCP.SynCount) filter functions.
+
+    FR3.5: Must support Deep Packet Inspection (DPI) for key L7 protocols: DNS, TLS, SMB, NFS.
+
+2.4 Output & Alerting
+
+    FR4.1: Must save matched streams to individual .pcap files, named uniquely by their stream key.
+
+    FR4.2: Must support two storage modes:
+
+        combined: Ingress and egress packets saved to a single file.
+
+        separate: Ingress and egress saved to distinct _client.pcap and _server.pcap files.
+
+    FR4.3: Must optionally create an empty .detected alert file immediately upon a stream matching the "Save" criteria.
+
+    FR4.4: Must provide a summary report upon exit, detailing total packets processed, dropped, streams created, and streams saved.
+
+3. Non-Functional Requirements
+3.1 Performance
+
+    NFR1.1: Must be capable of processing 10Gbps line-rate traffic without dropping packets on modern multi-core hardware (when using appropriate thread counts).
+
+    NFR1.2: Packet processing path must be lock-free to avoid contention between consumer threads.
+
+3.2 Reliability
+
+    NFR2.1: Must handle graceful shutdown (SIGINT/SIGTERM) without corrupting output files.
+
+    NFR2.2: Must not leak memory over long-duration runs (e.g., 24h+ monitoring).
+
+3.3 Usability
+
+    NFR3.1: Must provide clear, actionable error messages for invalid configuration or filter syntax.
+
+    NFR3.2: Configuration must be reloadable from external files (aliases, timeouts) without recompilation.
+
+4. Constraints
+
+    C1: Depends on libpcap for packet I/O.
+
+    C2: Requires a C++17 compliant compiler.
+
+    C3: Memory usage scales linearly with the number of concurrent streams and the configured buffer size per stream.
+
+5. Interface Specifications
+5.1 Command Line Interface (CLI)
+
+The primary interface for users. Key flags include:
+
+    -i <iface> / -r <file>: Input source.
+
+    -t <filter> / -p <filter>: Tag and Save filters.
+
+    -j <N>: Number of worker threads.
+
+    -M <mode>: Stream storage mode (combined/separate).
+
+5.2 Configuration Files
+
+    timeouts.conf: Key-value pairs defining idle timeouts per protocol.
+
+    aliases.conf: Key-value pairs defining shorthand names for complex filter strings.
